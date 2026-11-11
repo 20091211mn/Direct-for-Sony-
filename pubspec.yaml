@@ -1,0 +1,19 @@
+name: ps4_sender
+description: Send direct PKG links to a PS4 running GoldHEN (BinLoader). Derived from DirectPackageInstaller (GPL-3.0).
+publish_to: none
+version: 0.1.0+1
+
+environment:
+  sdk: ">=3.3.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+dev_dependencies:
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/payload.bin
