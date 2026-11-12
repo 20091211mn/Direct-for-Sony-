@@ -22,6 +22,6 @@ On the PS4: GoldHEN > Servers > BinLoader (port 9090). Phone and PS4 must be on 
 ## Status
 
 First version, untested on a real console. Known gaps:
-- `packageDigest` is sent empty (the original sends the PKG header digest).
+- `packageDigest` is a 64-zero placeholder (the original sends the PKG header digest).
 - No segmented mode / archives / file-host resolvers yet.
 - Proxy mode relays on the phone; no Android foreground service yet, keep the app open.

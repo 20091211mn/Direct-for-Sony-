@@ -20,6 +20,8 @@ import 'pkg_info.dart';
 
 typedef Log = void Function(String message);
 
+int _proxyLogged = 0;
+
 class Ps4Sender {
   static const _binLoaderPorts = [9090, 9021, 9020];
 
@@ -49,6 +51,7 @@ class Ps4Sender {
   }) async {
     ServerSocket? info;
     HttpServer? http;
+    _proxyLogged = 0;
     try {
       // --- 1. manifest HTTP server -------------------------------------
       http = await HttpServer.bind(InternetAddress.anyIPv4, 0);
@@ -63,9 +66,9 @@ class Ps4Sender {
       var lastActivity = DateTime.now();
       final manifest = jsonEncode({
         'originalFileSize': pkg.size,
-        // TODO: the original sends the PKG header digest here. Zeros are
-        // used until verified on a real console.
-        'packageDigest': '',
+        // The original sends the PKG header digest (64 hex chars). A
+        // same-shaped placeholder is used until the offset is verified.
+        'packageDigest': '0' * 64,
         'numberOfSplitFiles': 1,
         'pieces': [
           {
@@ -79,6 +82,10 @@ class Ps4Sender {
       http.listen((req) async {
         lastActivity = DateTime.now();
         if (req.uri.path.startsWith('/proxy')) {
+          if (_proxyLogged++ < 6) {
+            log('PS4 ${req.method} /proxy '
+                '${req.headers.value(HttpHeaders.rangeHeader) ?? ''}');
+          }
           active++;
           try {
             served += await _proxy(req, log);
@@ -88,14 +95,14 @@ class Ps4Sender {
           }
           return;
         }
-        log('PS4 requested ${req.uri.path}');
+        log('PS4 ${req.method} ${req.uri.path}'
+            '${req.headers.value(HttpHeaders.rangeHeader) ?? ''}');
         if (req.uri.path.startsWith('/json/')) {
-          req.response.headers.contentType = ContentType.json;
-          req.response.write(manifest);
+          await _serveBytes(req, utf8.encode(manifest), 'application/json');
         } else {
           req.response.statusCode = 404;
+          await req.response.close();
         }
-        await req.response.close();
       });
       final manifestUrl = 'http://$phoneIp:${http.port}/json/0.json';
       log('Manifest: $manifestUrl');
@@ -162,7 +169,10 @@ class Ps4Sender {
       final b64 = req.uri.queryParameters['b64'];
       if (b64 == null) throw Exception('missing url');
       final target = utf8.decode(base64.decode(b64));
-      final up = await client.getUrl(Uri.parse(target));
+      final uri = Uri.parse(target);
+      final up = req.method == 'HEAD'
+          ? await client.headUrl(uri)
+          : await client.getUrl(uri);
       final range = req.headers.value(HttpHeaders.rangeHeader);
       if (range != null) up.headers.set(HttpHeaders.rangeHeader, range);
       final res = await up.close();
@@ -170,11 +180,13 @@ class Ps4Sender {
       for (final h in const [
         HttpHeaders.contentRangeHeader,
         HttpHeaders.contentTypeHeader,
-        HttpHeaders.acceptRangesHeader,
       ]) {
         final v = res.headers.value(h);
         if (v != null) req.response.headers.set(h, v);
       }
+      req.response.headers
+        ..set(HttpHeaders.acceptRangesHeader, 'bytes')
+        ..set(HttpHeaders.connectionHeader, 'keep-alive');
       if (res.contentLength >= 0) {
         req.response.contentLength = res.contentLength;
       }
@@ -194,6 +206,48 @@ class Ps4Sender {
       client.close(force: true);
     }
     return sent;
+  }
+
+  /// Serves bytes with an explicit Content-Length (no chunked encoding,
+  /// which the PS4 downloader may not handle) and basic Range support.
+  static Future<void> _serveBytes(
+      HttpRequest req, List<int> data, String type) async {
+    final r = req.response;
+    var start = 0;
+    var end = data.length - 1;
+    var partial = false;
+    final range = req.headers.value(HttpHeaders.rangeHeader);
+    final m = range == null ? null : RegExp(r'bytes=(\d*)-(\d*)').firstMatch(range);
+    if (m != null) {
+      final a = m.group(1)!, b = m.group(2)!;
+      if (a.isEmpty && b.isNotEmpty) {
+        start = (data.length - int.parse(b)).clamp(0, data.length);
+      } else if (a.isNotEmpty) {
+        start = int.parse(a);
+        if (b.isNotEmpty) end = int.parse(b);
+      }
+      if (end > data.length - 1) end = data.length - 1;
+      partial = true;
+    }
+    if (start > end) {
+      r.statusCode = 416;
+      r.headers.set(HttpHeaders.contentRangeHeader, 'bytes */${data.length}');
+      r.contentLength = 0;
+      await r.close();
+      return;
+    }
+    r.statusCode = partial ? 206 : 200;
+    r.headers
+      ..set(HttpHeaders.contentTypeHeader, type)
+      ..set(HttpHeaders.acceptRangesHeader, 'bytes')
+      ..set(HttpHeaders.connectionHeader, 'keep-alive');
+    if (partial) {
+      r.headers.set(
+          HttpHeaders.contentRangeHeader, 'bytes $start-$end/${data.length}');
+    }
+    r.contentLength = end - start + 1;
+    if (req.method != 'HEAD') r.add(data.sublist(start, end + 1));
+    await r.close();
   }
 
   static Future<Socket> _next(StreamIterator<Socket> it, Duration t) async {
