@@ -10,6 +10,7 @@ class PkgInfo {
     required this.title,
     required this.contentId,
     required this.category,
+    required this.digest,
     this.icon,
   });
 
@@ -18,6 +19,8 @@ class PkgInfo {
   final String title;
   final String contentId;
   final String category; // e.g. gd, gp, ac
+  /// PKG header digest (32 bytes at 0xFE0) as upper-case hex, like the original tool.
+  final String digest;
   final Uint8List? icon;
 
   /// Same rule the original tool uses: "PS4" + CATEGORY upper-case.
@@ -79,12 +82,23 @@ class PkgReader {
         icon = await _bytes(client, url, iconOff, iconOff + iconLen - 1);
       }
 
+      // Final header digest: 32 bytes at 0xFE0 (header ends at 0x1000).
+      var digest = '0' * 64;
+      if (head.length >= 0x1000) {
+        digest = head
+            .sublist(0xFE0, 0x1000)
+            .map((b) => b.toRadixString(16).padLeft(2, '0'))
+            .join()
+            .toUpperCase();
+      }
+
       return PkgInfo(
         url: url,
         size: size,
         title: sfo['TITLE'] ?? 'Unknown',
         contentId: sfo['CONTENT_ID'] ?? '',
         category: sfo['CATEGORY'] ?? 'gd',
+        digest: digest,
         icon: icon,
       );
     } finally {

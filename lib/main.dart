@@ -61,6 +61,7 @@ class _HomePageState extends State<HomePage> {
       final pkg = await PkgReader.read(_url.text.trim());
       setState(() => _pkg = pkg);
       _log('Loaded: ${pkg.title} (${pkg.contentId})');
+      _log('Size: ${pkg.size} bytes, digest: ${pkg.digest.substring(0, 16)}...');
     } catch (e) {
       _log('Load failed: $e');
     } finally {

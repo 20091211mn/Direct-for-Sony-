@@ -66,9 +66,8 @@ class Ps4Sender {
       var lastActivity = DateTime.now();
       final manifest = jsonEncode({
         'originalFileSize': pkg.size,
-        // The original sends the PKG header digest (64 hex chars). A
-        // same-shaped placeholder is used until the offset is verified.
-        'packageDigest': '0' * 64,
+        // Same as the original tool: PKG header digest as upper-case hex.
+        'packageDigest': pkg.digest,
         'numberOfSplitFiles': 1,
         'pieces': [
           {
@@ -88,7 +87,9 @@ class Ps4Sender {
           }
           active++;
           try {
-            served += await _proxy(req, log);
+            final n = await _proxy(req, log);
+            served += n;
+            if (_proxyLogged <= 6) log('Proxy served $n bytes');
           } finally {
             active--;
             lastActivity = DateTime.now();
