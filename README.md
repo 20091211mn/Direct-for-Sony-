@@ -35,6 +35,7 @@ applied by the GitHub Actions workflow after `flutter create`. It runs only whil
 
 - Send a direct link (optionally through the phone as a proxy) or a local PKG file.
 - Progress percentage, speed and estimated time left while the phone serves the package.
+- Fast mode: the phone downloads with parallel Range connections (like the original "Segmented Downloads"), without storing the file.
 - Arabic / English UI (button in the app bar).
 
 ## iPhone

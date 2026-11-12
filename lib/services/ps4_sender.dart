@@ -13,6 +13,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:flutter/services.dart' show rootBundle;
@@ -31,6 +32,12 @@ class _Stats {
   int served = 0;
   int active = 0;
   DateTime last = DateTime.now();
+}
+
+class _Chunk {
+  _Chunk(this.data, this.error);
+  final Uint8List? data;
+  final Object? error;
 }
 
 class _Range {
@@ -68,6 +75,7 @@ class Ps4Sender {
     required PkgInfo pkg,
     required Log log,
     bool proxy = true,
+    bool fast = true,
     void Function(int served)? onProgress,
     SendController? controller,
   }) async {
@@ -92,6 +100,16 @@ class Ps4Sender {
         pieceUrl = pkg.url!;
       }
       final useServer = isFile || proxy;
+
+      // Fast mode: the phone fetches the package with several parallel Range
+      // requests (like the original "Segmented Downloads") and relays it.
+      final Uri? fastUri =
+          (proxy && !isFile && fast) ? await _probe(pkg.url!) : null;
+      if (proxy && !isFile && fast) {
+        log(fastUri != null
+            ? 'Fast mode: parallel connections'
+            : 'Fast mode unavailable (server ignores ranges), using normal mode');
+      }
 
       final manifest = jsonEncode({
         'originalFileSize': pkg.size,
@@ -119,7 +137,12 @@ class Ps4Sender {
           final before = stats.served;
           stats.active++;
           try {
-            await _proxy(req, stats, log);
+            final fu = fastUri;
+            if (fu != null) {
+              await _proxyFast(req, fu, pkg.size, stats, log);
+            } else {
+              await _proxy(req, stats, log);
+            }
           } finally {
             stats.active--;
             stats.last = DateTime.now();
@@ -287,6 +310,155 @@ class Ps4Sender {
     }
   }
 
+  /// Checks that the server honours Range requests. Returns the final URL
+  /// (after redirects) or null when ranges are not supported.
+  static Future<Uri?> _probe(String url) async {
+    final c = HttpClient()..connectionTimeout = const Duration(seconds: 10);
+    try {
+      var u = Uri.parse(url);
+      final req = await c.getUrl(u);
+      req.headers.set(HttpHeaders.rangeHeader, 'bytes=0-0');
+      final res = await req.close();
+      for (final r in res.redirects) {
+        u = u.resolveUri(r.location);
+      }
+      final ok = res.statusCode == 206;
+      await res.drain<void>();
+      return ok ? u : null;
+    } catch (_) {
+      return null;
+    } finally {
+      c.close(force: true);
+    }
+  }
+
+  static Future<_Chunk> _fetchChunk(
+      HttpClient c, Uri uri, int from, int to) async {
+    final want = to - from + 1;
+    Object? last;
+    for (var attempt = 0; attempt < 3; attempt++) {
+      try {
+        final req = await c.getUrl(uri);
+        req.headers.set(HttpHeaders.rangeHeader, 'bytes=$from-$to');
+        final res = await req.close();
+        if (res.statusCode != 206) {
+          await res.drain<void>();
+          throw Exception('HTTP ${res.statusCode} (range not honoured)');
+        }
+        final b = BytesBuilder(copy: false);
+        await for (final d in res) {
+          b.add(d);
+        }
+        final out = b.takeBytes();
+        if (out.length != want) {
+          throw Exception('short read ${out.length}/$want');
+        }
+        return _Chunk(out, null);
+      } catch (e) {
+        last = e;
+        await Future<void>.delayed(Duration(milliseconds: 300 * (attempt + 1)));
+      }
+    }
+    return _Chunk(null, last ?? Exception('chunk failed'));
+  }
+
+  /// Streams bytes [start, end] of [uri] using up to [parallel] concurrent
+  /// Range requests of [chunk] bytes, delivered in order. Memory is bounded
+  /// by about parallel * chunk bytes.
+  static Stream<List<int>> _parallelRange(Uri uri, int start, int end,
+      {int chunk = 4 * 1024 * 1024, int parallel = 4}) async* {
+    final client = HttpClient()
+      ..connectionTimeout = const Duration(seconds: 15)
+      ..autoUncompress = false
+      ..maxConnectionsPerHost = parallel + 1;
+    try {
+      final total = end - start + 1;
+      final n = (total + chunk - 1) ~/ chunk;
+      final inflight = <int, Future<_Chunk>>{};
+      var launched = 0;
+      for (var i = 0; i < n; i++) {
+        while (launched < n && launched < i + parallel) {
+          final from = start + launched * chunk;
+          final to = math.min(from + chunk - 1, end);
+          inflight[launched] = _fetchChunk(client, uri, from, to);
+          launched++;
+        }
+        final c = await inflight.remove(i)!;
+        if (c.error != null) throw c.error!;
+        final data = c.data!;
+        const piece = 256 * 1024;
+        for (var o = 0; o < data.length; o += piece) {
+          yield Uint8List.sublistView(
+              data, o, math.min(o + piece, data.length));
+        }
+      }
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  /// Serves the package to the PS4 using [_parallelRange].
+  static Future<void> _proxyFast(
+      HttpRequest req, Uri uri, int size, _Stats st, Log log) async {
+    final r = req.response;
+    try {
+      final range =
+          _parseRange(req.headers.value(HttpHeaders.rangeHeader), size);
+      if (range == null) {
+        r.statusCode = 416;
+        r.headers.set(HttpHeaders.contentRangeHeader, 'bytes */$size');
+        r.contentLength = 0;
+        return;
+      }
+      r.statusCode = range.partial ? 206 : 200;
+      r.headers
+        ..set(HttpHeaders.contentTypeHeader, 'application/octet-stream')
+        ..set(HttpHeaders.acceptRangesHeader, 'bytes')
+        ..set(HttpHeaders.connectionHeader, 'keep-alive');
+      if (range.partial) {
+        r.headers.set(HttpHeaders.contentRangeHeader,
+            'bytes ${range.start}-${range.end}/$size');
+      }
+      r.contentLength = range.end - range.start + 1;
+      r.bufferOutput = false;
+      if (req.method != 'HEAD') {
+        await r.addStream(
+            _parallelRange(uri, range.start, range.end).map((c) {
+          st.served += c.length;
+          st.last = DateTime.now();
+          return c;
+        }));
+      }
+    } catch (e) {
+      log('Fast proxy error: $e');
+      try {
+        r.statusCode = 502;
+      } catch (_) {}
+    } finally {
+      try {
+        await r.close();
+      } catch (_) {}
+    }
+  }
+
+  /// Reads a file range in 1 MiB blocks (fewer, bigger writes than openRead).
+  static Stream<List<int>> _fileChunks(String path, int start, int end) async* {
+    final raf = await File(path).open();
+    try {
+      var pos = start;
+      while (pos <= end) {
+        final n = math.min(1024 * 1024, end - pos + 1);
+        await raf.setPosition(pos);
+        final b = await raf.read(n);
+        if (b.isEmpty) break;
+        pos += b.length;
+        yield b;
+      }
+    } finally {
+      await raf.close();
+    }
+  }
+
   /// Serves a local file with Content-Length and Range support.
   static Future<void> _serveFile(
       HttpRequest req, String path, _Stats st, Log log) async {
@@ -311,8 +483,9 @@ class Ps4Sender {
             'bytes ${range.start}-${range.end}/$len');
       }
       r.contentLength = range.end - range.start + 1;
+      r.bufferOutput = false;
       if (req.method != 'HEAD') {
-        await r.addStream(file.openRead(range.start, range.end + 1).map((c) {
+        await r.addStream(_fileChunks(path, range.start, range.end).map((c) {
           st.served += c.length;
           st.last = DateTime.now();
           return c;

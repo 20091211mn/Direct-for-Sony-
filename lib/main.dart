@@ -2,6 +2,7 @@ import 'dart:math' as math;
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
 import 'services/keep_alive.dart';
@@ -34,6 +35,43 @@ class App extends StatelessWidget {
 
 enum Source { link, file }
 
+/// Keeps only digits and dots. The iPhone number pad has no "." key (or shows
+/// a locale separator), so ",", "٫", "،" become "." and Arabic digits become 0-9.
+class _IpFormatter extends TextInputFormatter {
+  @override
+  TextEditingValue formatEditUpdate(
+      TextEditingValue oldValue, TextEditingValue newValue) {
+    final src = newValue.text;
+    final sel = newValue.selection.baseOffset;
+    final out = StringBuffer();
+    var cursor = 0;
+    for (var i = 0; i < src.length; i++) {
+      if (i == sel) cursor = out.length;
+      final c = src.codeUnitAt(i);
+      if (c >= 0x30 && c <= 0x39) {
+        out.writeCharCode(c);
+      } else if (c >= 0x0660 && c <= 0x0669) {
+        out.writeCharCode(0x30 + c - 0x0660);
+      } else if (c >= 0x06F0 && c <= 0x06F9) {
+        out.writeCharCode(0x30 + c - 0x06F0);
+      } else if (c == 0x2E ||
+          c == 0x2C ||
+          c == 0x066B ||
+          c == 0x060C ||
+          c == 0x3002 ||
+          c == 0xFF0C) {
+        out.write('.');
+      }
+    }
+    if (sel < 0 || sel >= src.length) cursor = out.length;
+    final text = out.toString();
+    return TextEditingValue(
+      text: text,
+      selection: TextSelection.collapsed(offset: math.min(cursor, text.length)),
+    );
+  }
+}
+
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
 
@@ -52,6 +90,7 @@ class _HomePageState extends State<HomePage> {
   bool _loading = false;
   bool _sending = false;
   bool _proxy = true;
+  bool _fast = true;
   bool _ar = true;
   int _served = 0;
   SpeedMeter _meter = SpeedMeter();
@@ -151,6 +190,7 @@ class _HomePageState extends State<HomePage> {
         phoneIp: phone,
         pkg: pkg,
         proxy: _proxy,
+        fast: _fast,
         controller: ctl,
         log: _log,
         onProgress: (n) {
@@ -274,7 +314,9 @@ class _HomePageState extends State<HomePage> {
               TextField(
                 controller: _ps4,
                 enabled: !_sending,
-                keyboardType: TextInputType.number,
+                keyboardType:
+                    const TextInputType.numberWithOptions(decimal: true),
+                inputFormatters: [_IpFormatter()],
                 textDirection: TextDirection.ltr,
                 decoration: InputDecoration(
                   labelText: t('PS4 IP', 'عنوان الـ PS4'),
@@ -331,6 +373,18 @@ class _HomePageState extends State<HomePage> {
                   onChanged:
                       busy ? null : (v) => setState(() => _proxy = v),
                 ),
+                if (_proxy)
+                  SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: Text(t('Fast mode (parallel connections)',
+                        'وضع سريع (اتصالات متوازية)')),
+                    subtitle: Text(t(
+                        'Faster with slow servers. Turn off if the download fails.',
+                        'أسرع مع السيرفرات البطيئة. أطفئه إذا فشل التحميل.')),
+                    value: _fast,
+                    onChanged:
+                        busy ? null : (v) => setState(() => _fast = v),
+                  ),
                 FilledButton.tonalIcon(
                   onPressed: busy ? null : _load,
                   icon: const Icon(Icons.search),
