@@ -2,7 +2,7 @@ import 'package:flutter/services.dart';
 
 /// Starts/stops the Android foreground service (with wake + Wi-Fi locks)
 /// so the phone keeps serving the PS4 while the app is in background.
-class KeepAlive {
+class ForegroundKeeper {
   static const _ch = MethodChannel('ps4sender/keepalive');
 
   static Future<void> start() async {

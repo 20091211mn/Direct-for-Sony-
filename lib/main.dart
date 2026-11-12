@@ -77,7 +77,7 @@ class _HomePageState extends State<HomePage> {
       return;
     }
     setState(() => _busy = true);
-    await KeepAlive.start();
+    await ForegroundKeeper.start();
     try {
       await Ps4Sender.send(
         ps4Ip: _ps4.text.trim(),
@@ -89,7 +89,7 @@ class _HomePageState extends State<HomePage> {
     } catch (e) {
       _log('Install failed: $e');
     } finally {
-      await KeepAlive.stop();
+      await ForegroundKeeper.stop();
       setState(() => _busy = false);
     }
   }
