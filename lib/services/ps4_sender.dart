@@ -59,7 +59,7 @@ class Ps4Sender {
       // plain HTTP on the LAN (no HTTPS / redirects, which BGFT can't do).
       final pieceUrl = proxy
           ? 'http://$phoneIp:${http.port}/proxy/?b64='
-              '${Uri.encodeQueryComponent(base64.encode(utf8.encode(pkg.url)))}'
+              '${base64Url.encode(utf8.encode(pkg.url)).replaceAll('=', '')}'
           : pkg.url;
       var active = 0;
       var served = 0;
@@ -166,9 +166,12 @@ class Ps4Sender {
       ..autoUncompress = false;
     var sent = 0;
     try {
-      final b64 = req.uri.queryParameters['b64'];
-      if (b64 == null) throw Exception('missing url');
-      final target = utf8.decode(base64.decode(b64));
+      // The PS4 appends its own "?..." parameters to the URL, so read only
+      // the URL-safe base64 characters right after "b64=".
+      final m = RegExp(r'b64=([A-Za-z0-9_\-]+)').firstMatch(req.uri.query);
+      if (m == null) throw Exception('missing url');
+      final target =
+          utf8.decode(base64Url.decode(base64Url.normalize(m.group(1)!)));
       final uri = Uri.parse(target);
       final up = req.method == 'HEAD'
           ? await client.headUrl(uri)
