@@ -41,6 +41,7 @@ class _HomePageState extends State<HomePage> {
   PkgInfo? _pkg;
   String? _phoneIp;
   bool _busy = false;
+  bool _proxy = true;
 
   @override
   void initState() {
@@ -80,6 +81,7 @@ class _HomePageState extends State<HomePage> {
         ps4Ip: _ps4.text.trim(),
         phoneIp: phone,
         pkg: pkg,
+        proxy: _proxy,
         log: _log,
       );
     } catch (e) {
@@ -133,7 +135,15 @@ class _HomePageState extends State<HomePage> {
                 border: OutlineInputBorder(),
               ),
             ),
-            const SizedBox(height: 12),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Proxy download via phone'),
+              subtitle: const Text(
+                  'Needed for HTTPS links and redirects. Keep the app open.'),
+              value: _proxy,
+              onChanged: _busy ? null : (v) => setState(() => _proxy = v),
+            ),
+            const SizedBox(height: 4),
             Row(children: [
               Expanded(
                 child: FilledButton.tonalIcon(

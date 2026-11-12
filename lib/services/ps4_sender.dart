@@ -45,12 +45,22 @@ class Ps4Sender {
     required String phoneIp,
     required PkgInfo pkg,
     required Log log,
+    bool proxy = true,
   }) async {
     ServerSocket? info;
     HttpServer? http;
     try {
       // --- 1. manifest HTTP server -------------------------------------
       http = await HttpServer.bind(InternetAddress.anyIPv4, 0);
+      // In proxy mode the PS4 downloads through the phone: it only needs
+      // plain HTTP on the LAN (no HTTPS / redirects, which BGFT can't do).
+      final pieceUrl = proxy
+          ? 'http://$phoneIp:${http.port}/proxy/?b64='
+              '${Uri.encodeQueryComponent(base64.encode(utf8.encode(pkg.url)))}'
+          : pkg.url;
+      var active = 0;
+      var served = 0;
+      var lastActivity = DateTime.now();
       final manifest = jsonEncode({
         'originalFileSize': pkg.size,
         // TODO: the original sends the PKG header digest here. Zeros are
@@ -59,7 +69,7 @@ class Ps4Sender {
         'numberOfSplitFiles': 1,
         'pieces': [
           {
-            'url': pkg.url,
+            'url': pieceUrl,
             'fileOffset': 0,
             'fileSize': pkg.size,
             'hashValue': '0000000000000000000000000000000000000000',
@@ -67,6 +77,17 @@ class Ps4Sender {
         ],
       });
       http.listen((req) async {
+        lastActivity = DateTime.now();
+        if (req.uri.path.startsWith('/proxy')) {
+          active++;
+          try {
+            served += await _proxy(req, log);
+          } finally {
+            active--;
+            lastActivity = DateTime.now();
+          }
+          return;
+        }
         log('PS4 requested ${req.uri.path}');
         if (req.uri.path.startsWith('/json/')) {
           req.response.headers.contentType = ContentType.json;
@@ -105,13 +126,74 @@ class Ps4Sender {
         await again.close();
       } catch (_) {}
 
-      // Give the PS4 time to fetch the manifest.
-      await Future<void>.delayed(const Duration(seconds: 5));
+      if (!proxy) {
+        // Give the PS4 time to fetch the manifest.
+        await Future<void>.delayed(const Duration(seconds: 5));
+      } else {
+        // Keep relaying until the PS4 has been idle for 60 s.
+        log('Proxy running. Keep this app open until the download ends.');
+        var lastLog = 0;
+        while (active > 0 ||
+            DateTime.now().difference(lastActivity).inSeconds < 60) {
+          await Future<void>.delayed(const Duration(seconds: 1));
+          final mb = served ~/ (1024 * 1024);
+          if (mb >= lastLog + 50) {
+            lastLog = mb;
+            log('Relayed $mb MB');
+          }
+        }
+        log('Relayed ${served ~/ (1024 * 1024)} MB in total');
+      }
       log('Done. Check the PS4 notifications / Downloads.');
     } finally {
       await info?.close();
       await http?.close(force: true);
     }
+  }
+
+  /// Relays the request to the origin (following redirects/HTTPS) and
+  /// streams the answer back, keeping Range support. Returns bytes sent.
+  static Future<int> _proxy(HttpRequest req, Log log) async {
+    final client = HttpClient()
+      ..connectionTimeout = const Duration(seconds: 15)
+      ..autoUncompress = false;
+    var sent = 0;
+    try {
+      final b64 = req.uri.queryParameters['b64'];
+      if (b64 == null) throw Exception('missing url');
+      final target = utf8.decode(base64.decode(b64));
+      final up = await client.getUrl(Uri.parse(target));
+      final range = req.headers.value(HttpHeaders.rangeHeader);
+      if (range != null) up.headers.set(HttpHeaders.rangeHeader, range);
+      final res = await up.close();
+      req.response.statusCode = res.statusCode;
+      for (final h in const [
+        HttpHeaders.contentRangeHeader,
+        HttpHeaders.contentTypeHeader,
+        HttpHeaders.acceptRangesHeader,
+      ]) {
+        final v = res.headers.value(h);
+        if (v != null) req.response.headers.set(h, v);
+      }
+      if (res.contentLength >= 0) {
+        req.response.contentLength = res.contentLength;
+      }
+      await for (final chunk in res) {
+        req.response.add(chunk);
+        sent += chunk.length;
+      }
+    } catch (e) {
+      log('Proxy error: $e');
+      try {
+        req.response.statusCode = 502;
+      } catch (_) {}
+    } finally {
+      try {
+        await req.response.close();
+      } catch (_) {}
+      client.close(force: true);
+    }
+    return sent;
   }
 
   static Future<Socket> _next(StreamIterator<Socket> it, Duration t) async {
