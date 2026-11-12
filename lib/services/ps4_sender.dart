@@ -2,13 +2,14 @@
 //   Host/PayloadService.cs, Host/PS4Server.cs (RegisterJSON), Payload/info.c
 //
 // Flow (GoldHEN BinLoader only, no Remote Package Installer):
-//  1. Listen on a local TCP port ("info socket") and an HTTP port (manifest).
+//  1. Listen on a local TCP port ("info socket") and an HTTP port.
 //  2. Connect to PS4:9090 (BinLoader), patch the payload with our IP:port
 //     and send it. The payload runs on the PS4.
 //  3. The payload connects back to the info socket. We send the package
 //     info (URL of our manifest, name, content id, type, size, icon).
-//  4. The PS4 downloads http://PHONE:PORT/json/0.json, which points to the
-//     real PKG URL, and queues the download.
+//  4. The PS4 downloads http://PHONE:PORT/json/0.json and then the package,
+//     either from the phone (/proxy/ for links, /file/ for local files)
+//     or directly from the original link.
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -19,6 +20,25 @@ import 'package:flutter/services.dart' show rootBundle;
 import 'pkg_info.dart';
 
 typedef Log = void Function(String message);
+
+/// Lets the UI stop a running transfer.
+class SendController {
+  bool cancelled = false;
+  void cancel() => cancelled = true;
+}
+
+class _Stats {
+  int served = 0;
+  int active = 0;
+  DateTime last = DateTime.now();
+}
+
+class _Range {
+  _Range(this.start, this.end, this.partial);
+  final int start;
+  final int end;
+  final bool partial;
+}
 
 int _proxyLogged = 0;
 
@@ -48,22 +68,31 @@ class Ps4Sender {
     required PkgInfo pkg,
     required Log log,
     bool proxy = true,
+    void Function(int served)? onProgress,
+    SendController? controller,
   }) async {
     ServerSocket? info;
     HttpServer? http;
+    Timer? ticker;
+    final stats = _Stats();
+    final ctl = controller ?? SendController();
     _proxyLogged = 0;
     try {
-      // --- 1. manifest HTTP server -------------------------------------
+      // --- 1. HTTP server: manifest + proxy/file ------------------------
       http = await HttpServer.bind(InternetAddress.anyIPv4, 0);
-      // In proxy mode the PS4 downloads through the phone: it only needs
-      // plain HTTP on the LAN (no HTTPS / redirects, which BGFT can't do).
-      final pieceUrl = proxy
-          ? 'http://$phoneIp:${http.port}/proxy/?b64='
-              '${base64Url.encode(utf8.encode(pkg.url)).replaceAll('=', '')}'
-          : pkg.url;
-      var active = 0;
-      var served = 0;
-      var lastActivity = DateTime.now();
+      final isFile = pkg.localPath != null;
+      final base = 'http://$phoneIp:${http.port}';
+      final String pieceUrl;
+      if (isFile) {
+        pieceUrl = '$base/file/0.pkg';
+      } else if (proxy) {
+        pieceUrl = '$base/proxy/?b64='
+            '${base64Url.encode(utf8.encode(pkg.url!)).replaceAll('=', '')}';
+      } else {
+        pieceUrl = pkg.url!;
+      }
+      final useServer = isFile || proxy;
+
       final manifest = jsonEncode({
         'originalFileSize': pkg.size,
         // Same as the original tool: PKG header digest as upper-case hex.
@@ -78,35 +107,52 @@ class Ps4Sender {
           }
         ],
       });
+
       http.listen((req) async {
-        lastActivity = DateTime.now();
-        if (req.uri.path.startsWith('/proxy')) {
+        stats.last = DateTime.now();
+        final path = req.uri.path;
+        if (path.startsWith('/proxy') && !isFile) {
           if (_proxyLogged++ < 6) {
             log('PS4 ${req.method} /proxy '
                 '${req.headers.value(HttpHeaders.rangeHeader) ?? ''}');
           }
-          active++;
+          final before = stats.served;
+          stats.active++;
           try {
-            final n = await _proxy(req, log);
-            served += n;
-            if (_proxyLogged <= 6) log('Proxy served $n bytes');
+            await _proxy(req, stats, log);
           } finally {
-            active--;
-            lastActivity = DateTime.now();
+            stats.active--;
+            stats.last = DateTime.now();
           }
-          return;
-        }
-        log('PS4 ${req.method} ${req.uri.path}'
-            '${req.headers.value(HttpHeaders.rangeHeader) ?? ''}');
-        if (req.uri.path.startsWith('/json/')) {
+          if (_proxyLogged <= 6) {
+            log('Proxy served ${stats.served - before} bytes');
+          }
+        } else if (path.startsWith('/file/') && isFile) {
+          if (_proxyLogged++ < 6) {
+            log('PS4 ${req.method} /file '
+                '${req.headers.value(HttpHeaders.rangeHeader) ?? ''}');
+          }
+          stats.active++;
+          try {
+            await _serveFile(req, pkg.localPath!, stats, log);
+          } finally {
+            stats.active--;
+            stats.last = DateTime.now();
+          }
+        } else if (path.startsWith('/json/')) {
+          log('PS4 ${req.method} ${req.uri.path}'
+              '${req.headers.value(HttpHeaders.rangeHeader) ?? ''}');
           await _serveBytes(req, utf8.encode(manifest), 'application/json');
         } else {
           req.response.statusCode = 404;
           await req.response.close();
         }
       });
-      final manifestUrl = 'http://$phoneIp:${http.port}/json/0.json';
+      final manifestUrl = '$base/json/0.json';
       log('Manifest: $manifestUrl');
+
+      ticker = Timer.periodic(const Duration(milliseconds: 500),
+          (_) => onProgress?.call(stats.served));
 
       // --- 2. info socket (the payload connects back here) --------------
       info = await ServerSocket.bind(InternetAddress.anyIPv4, 0);
@@ -119,7 +165,7 @@ class Ps4Sender {
 
       // --- 4. wait for the payload, send package info -------------------
       log('Waiting for the PS4 payload...');
-      Socket client = await _next(incoming, const Duration(seconds: 15));
+      final client = await _next(incoming, const Duration(seconds: 15));
       client.add(_infoBuffer(manifestUrl, pkg));
       await client.flush();
       await client.close();
@@ -134,38 +180,62 @@ class Ps4Sender {
         await again.close();
       } catch (_) {}
 
-      if (!proxy) {
-        // Give the PS4 time to fetch the manifest.
+      if (!useServer) {
+        // Direct mode: the PS4 downloads by itself; just let it fetch the manifest.
         await Future<void>.delayed(const Duration(seconds: 5));
       } else {
-        // Keep relaying until the PS4 has been idle for 60 s.
-        log('Proxy running. Keep this app open until the download ends.');
-        var lastLog = 0;
-        while (active > 0 ||
-            DateTime.now().difference(lastActivity).inSeconds < 60) {
-          await Future<void>.delayed(const Duration(seconds: 1));
-          final mb = served ~/ (1024 * 1024);
-          if (mb >= lastLog + 50) {
-            lastLog = mb;
-            log('Relayed $mb MB');
-          }
+        log('Serving the package. Keep this app open until it ends.');
+        while (!ctl.cancelled) {
+          final idle = DateTime.now().difference(stats.last).inSeconds;
+          final done = stats.served >= pkg.size;
+          final limit = done ? 10 : (stats.served == 0 ? 120 : 60);
+          if ((stats.active == 0 && idle >= limit) || idle >= 300) break;
+          await Future<void>.delayed(const Duration(milliseconds: 500));
         }
-        log('Relayed ${served ~/ (1024 * 1024)} MB in total');
+        onProgress?.call(stats.served);
+        log(ctl.cancelled
+            ? 'Stopped by user'
+            : 'Transferred ${stats.served ~/ (1024 * 1024)} MB');
       }
       log('Done. Check the PS4 notifications / Downloads.');
     } finally {
+      ticker?.cancel();
       await info?.close();
       await http?.close(force: true);
     }
   }
 
+  // ---------------------------------------------------------------------
+  // HTTP helpers
+
+  static _Range? _parseRange(String? header, int length) {
+    var start = 0;
+    var end = length - 1;
+    var partial = false;
+    final m =
+        header == null ? null : RegExp(r'bytes=(\d*)-(\d*)').firstMatch(header);
+    if (m != null) {
+      final a = m.group(1)!, b = m.group(2)!;
+      if (a.isEmpty && b.isNotEmpty) {
+        start = length - int.parse(b);
+        if (start < 0) start = 0;
+      } else if (a.isNotEmpty) {
+        start = int.parse(a);
+        if (b.isNotEmpty) end = int.parse(b);
+      }
+      if (end > length - 1) end = length - 1;
+      partial = true;
+    }
+    if (start > end) return null;
+    return _Range(start, end, partial);
+  }
+
   /// Relays the request to the origin (following redirects/HTTPS) and
-  /// streams the answer back, keeping Range support. Returns bytes sent.
-  static Future<int> _proxy(HttpRequest req, Log log) async {
+  /// streams the answer back, keeping Range support.
+  static Future<void> _proxy(HttpRequest req, _Stats st, Log log) async {
     final client = HttpClient()
       ..connectionTimeout = const Duration(seconds: 15)
       ..autoUncompress = false;
-    var sent = 0;
     try {
       // The PS4 appends its own "?..." parameters to the URL, so read only
       // the URL-safe base64 characters right after "b64=".
@@ -194,9 +264,15 @@ class Ps4Sender {
       if (res.contentLength >= 0) {
         req.response.contentLength = res.contentLength;
       }
-      await for (final chunk in res) {
-        req.response.add(chunk);
-        sent += chunk.length;
+      if (req.method == 'HEAD') {
+        await res.drain<void>();
+      } else {
+        // addStream waits for the PS4 to consume data (no unbounded buffering).
+        await req.response.addStream(res.map((chunk) {
+          st.served += chunk.length;
+          st.last = DateTime.now();
+          return chunk;
+        }));
       }
     } catch (e) {
       log('Proxy error: $e');
@@ -209,7 +285,49 @@ class Ps4Sender {
       } catch (_) {}
       client.close(force: true);
     }
-    return sent;
+  }
+
+  /// Serves a local file with Content-Length and Range support.
+  static Future<void> _serveFile(
+      HttpRequest req, String path, _Stats st, Log log) async {
+    final r = req.response;
+    try {
+      final file = File(path);
+      final len = await file.length();
+      final range = _parseRange(req.headers.value(HttpHeaders.rangeHeader), len);
+      if (range == null) {
+        r.statusCode = 416;
+        r.headers.set(HttpHeaders.contentRangeHeader, 'bytes */$len');
+        r.contentLength = 0;
+        return;
+      }
+      r.statusCode = range.partial ? 206 : 200;
+      r.headers
+        ..set(HttpHeaders.contentTypeHeader, 'application/octet-stream')
+        ..set(HttpHeaders.acceptRangesHeader, 'bytes')
+        ..set(HttpHeaders.connectionHeader, 'keep-alive');
+      if (range.partial) {
+        r.headers.set(HttpHeaders.contentRangeHeader,
+            'bytes ${range.start}-${range.end}/$len');
+      }
+      r.contentLength = range.end - range.start + 1;
+      if (req.method != 'HEAD') {
+        await r.addStream(file.openRead(range.start, range.end + 1).map((c) {
+          st.served += c.length;
+          st.last = DateTime.now();
+          return c;
+        }));
+      }
+    } catch (e) {
+      log('File serve error: $e');
+      try {
+        r.statusCode = 500;
+      } catch (_) {}
+    } finally {
+      try {
+        await r.close();
+      } catch (_) {}
+    }
   }
 
   /// Serves bytes with an explicit Content-Length (no chunked encoding,
@@ -217,42 +335,33 @@ class Ps4Sender {
   static Future<void> _serveBytes(
       HttpRequest req, List<int> data, String type) async {
     final r = req.response;
-    var start = 0;
-    var end = data.length - 1;
-    var partial = false;
-    final range = req.headers.value(HttpHeaders.rangeHeader);
-    final m = range == null ? null : RegExp(r'bytes=(\d*)-(\d*)').firstMatch(range);
-    if (m != null) {
-      final a = m.group(1)!, b = m.group(2)!;
-      if (a.isEmpty && b.isNotEmpty) {
-        start = (data.length - int.parse(b)).clamp(0, data.length);
-      } else if (a.isNotEmpty) {
-        start = int.parse(a);
-        if (b.isNotEmpty) end = int.parse(b);
-      }
-      if (end > data.length - 1) end = data.length - 1;
-      partial = true;
-    }
-    if (start > end) {
+    final range =
+        _parseRange(req.headers.value(HttpHeaders.rangeHeader), data.length);
+    if (range == null) {
       r.statusCode = 416;
       r.headers.set(HttpHeaders.contentRangeHeader, 'bytes */${data.length}');
       r.contentLength = 0;
       await r.close();
       return;
     }
-    r.statusCode = partial ? 206 : 200;
+    r.statusCode = range.partial ? 206 : 200;
     r.headers
       ..set(HttpHeaders.contentTypeHeader, type)
       ..set(HttpHeaders.acceptRangesHeader, 'bytes')
       ..set(HttpHeaders.connectionHeader, 'keep-alive');
-    if (partial) {
-      r.headers.set(
-          HttpHeaders.contentRangeHeader, 'bytes $start-$end/${data.length}');
+    if (range.partial) {
+      r.headers.set(HttpHeaders.contentRangeHeader,
+          'bytes ${range.start}-${range.end}/${data.length}');
     }
-    r.contentLength = end - start + 1;
-    if (req.method != 'HEAD') r.add(data.sublist(start, end + 1));
+    r.contentLength = range.end - range.start + 1;
+    if (req.method != 'HEAD') {
+      r.add(data.sublist(range.start, range.end + 1));
+    }
     await r.close();
   }
+
+  // ---------------------------------------------------------------------
+  // PS4 side
 
   static Future<Socket> _next(StreamIterator<Socket> it, Duration t) async {
     final ok = await it.moveNext().timeout(t);
@@ -262,9 +371,8 @@ class Ps4Sender {
 
   static Future<void> _sendPayload(
       String ps4Ip, String phoneIp, int port, Log log) async {
-    final payload =
-        (await rootBundle.load('assets/payload.bin')).buffer.asUint8List().toList();
-    Uint8List data = Uint8List.fromList(payload);
+    final data = Uint8List.fromList(
+        (await rootBundle.load('assets/payload.bin')).buffer.asUint8List());
 
     // Marker: 6 bytes 0xB4. First 4 = IP, next 2 = port (big endian).
     var off = -1;
@@ -314,8 +422,8 @@ class Ps4Sender {
   /// u32 1 | (u32 len + bytes) url, name, id, type | u64 size | u32 iconLen + icon
   static Uint8List _infoBuffer(String manifestUrl, PkgInfo pkg) {
     final b = BytesBuilder();
-    void u32(int v) =>
-        b.add((ByteData(4)..setUint32(0, v, Endian.little)).buffer.asUint8List());
+    void u32(int v) => b.add(
+        (ByteData(4)..setUint32(0, v, Endian.little)).buffer.asUint8List());
     void str(String s) {
       final bytes = utf8.encode(s);
       u32(bytes.length);

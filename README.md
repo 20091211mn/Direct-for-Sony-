@@ -30,3 +30,15 @@ First version, untested on a real console. Known gaps:
 
 `native/` and `tool/patch_android.sh` add an Android foreground service (wake lock + Wi-Fi lock),
 applied by the GitHub Actions workflow after `flutter create`. It runs only while a transfer is active.
+
+## Features
+
+- Send a direct link (optionally through the phone as a proxy) or a local PKG file.
+- Progress percentage, speed and estimated time left while the phone serves the package.
+- Arabic / English UI (button in the app bar).
+
+## iPhone
+
+`.github/workflows/build-ios.yml` builds an unsigned `ps4-sender.ipa` (run it manually).
+It must be signed/sideloaded (for example with AltStore or Sideloadly). iOS suspends apps in
+the background, so keep the app open with the screen on while sending.

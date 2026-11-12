@@ -2,24 +2,30 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
-/// Basic info read from a remote PS4 PKG using HTTP Range requests.
+/// Basic info read from a PS4 PKG (remote link or local file).
 class PkgInfo {
   PkgInfo({
-    required this.url,
     required this.size,
     required this.title,
     required this.contentId,
     required this.category,
     required this.digest,
+    this.url,
+    this.localPath,
     this.icon,
   });
 
-  final String url;
+  /// Direct link (null when the package is a local file).
+  final String? url;
+
+  /// Path of the picked file (null when the package is a link).
+  final String? localPath;
   final int size;
   final String title;
   final String contentId;
   final String category; // e.g. gd, gp, ac
-  /// PKG header digest (32 bytes at 0xFE0) as upper-case hex, like the original tool.
+
+  /// PKG header digest (32 bytes at 0xFE0) as upper-case hex.
   final String digest;
   final Uint8List? icon;
 
@@ -27,27 +33,99 @@ class PkgInfo {
   String get bgftType => 'PS4${category.toUpperCase()}';
 }
 
+abstract class _ByteSource {
+  Future<int> size();
+  Future<Uint8List> read(int from, int toInclusive);
+  Future<void> close();
+}
+
+class _HttpSource implements _ByteSource {
+  _HttpSource(this.url);
+
+  final String url;
+  final HttpClient _client = HttpClient()
+    ..connectionTimeout = const Duration(seconds: 15);
+  int? _size;
+
+  Future<HttpClientResponse> _range(int from, int to) async {
+    final req = await _client.getUrl(Uri.parse(url));
+    req.headers.set(HttpHeaders.rangeHeader, 'bytes=$from-$to');
+    return req.close();
+  }
+
+  @override
+  Future<int> size() async {
+    if (_size != null) return _size!;
+    final probe = await _range(0, 0);
+    final cr = probe.headers.value('content-range');
+    int? size;
+    if (cr != null && cr.contains('/')) {
+      size = int.tryParse(cr.split('/').last);
+    }
+    size ??= probe.contentLength > 0 ? probe.contentLength : null;
+    await probe.drain<void>();
+    if (size == null) throw Exception('Server did not report the file size');
+    return _size = size;
+  }
+
+  @override
+  Future<Uint8List> read(int from, int toInclusive) async {
+    final res = await _range(from, toInclusive);
+    if (res.statusCode != 206 && res.statusCode != 200) {
+      throw Exception('HTTP ${res.statusCode}');
+    }
+    final want = toInclusive - from + 1;
+    final b = BytesBuilder();
+    await for (final chunk in res) {
+      b.add(chunk);
+      if (b.length > want) break; // server ignored Range
+    }
+    final all = b.takeBytes();
+    return all.length > want ? Uint8List.sublistView(all, 0, want) : all;
+  }
+
+  @override
+  Future<void> close() async => _client.close(force: true);
+}
+
+class _FileSource implements _ByteSource {
+  _FileSource(this.path);
+
+  final String path;
+  RandomAccessFile? _raf;
+
+  @override
+  Future<int> size() => File(path).length();
+
+  @override
+  Future<Uint8List> read(int from, int toInclusive) async {
+    final raf = _raf ??= await File(path).open();
+    await raf.setPosition(from);
+    return raf.read(toInclusive - from + 1);
+  }
+
+  @override
+  Future<void> close() async => _raf?.close();
+}
+
 class PkgReader {
   static const _entryParamSfo = 0x1000;
   static const _entryIcon0 = 0x1200;
 
-  static Future<PkgInfo> read(String url) async {
-    final client = HttpClient()..connectionTimeout = const Duration(seconds: 15);
-    try {
-      // Total size via a 1-byte range request.
-      final probe = await _range(client, url, 0, 0);
-      final cr = probe.headers.value('content-range');
-      int? size;
-      if (cr != null && cr.contains('/')) {
-        size = int.tryParse(cr.split('/').last);
-      }
-      size ??= probe.contentLength > 0 ? probe.contentLength : null;
-      await probe.drain<void>();
-      if (size == null) throw Exception('Server did not report the file size');
+  static Future<PkgInfo> readUrl(String url) =>
+      _read(_HttpSource(url), url: url);
 
-      final head = await _bytes(client, url, 0, 0xFFFF);
+  static Future<PkgInfo> readFile(String path) =>
+      _read(_FileSource(path), localPath: path);
+
+  static Future<PkgInfo> _read(_ByteSource src,
+      {String? url, String? localPath}) async {
+    try {
+      final size = await src.size();
+
+      final head = await src.read(0, 0xFFFF);
       final bd = ByteData.sublistView(head);
-      if (bd.getUint32(0, Endian.big) != 0x7F434E54) {
+      if (head.length < 0x40 || bd.getUint32(0, Endian.big) != 0x7F434E54) {
         throw Exception('Not a PS4 PKG (bad magic)');
       }
       final count = bd.getUint32(0x10, Endian.big);
@@ -72,14 +150,13 @@ class PkgReader {
         throw Exception('PARAM.SFO not found in PKG');
       }
 
-      final sfo =
-          _parseSfo(await _bytes(client, url, sfoOff, sfoOff + sfoLen - 1));
+      final sfo = _parseSfo(await src.read(sfoOff, sfoOff + sfoLen - 1));
       Uint8List? icon;
       if (iconOff != null &&
           iconLen != null &&
           iconLen > 0 &&
           iconLen < 2 * 1024 * 1024) {
-        icon = await _bytes(client, url, iconOff, iconOff + iconLen - 1);
+        icon = await src.read(iconOff, iconOff + iconLen - 1);
       }
 
       // Final header digest: 32 bytes at 0xFE0 (header ends at 0x1000).
@@ -94,6 +171,7 @@ class PkgReader {
 
       return PkgInfo(
         url: url,
+        localPath: localPath,
         size: size,
         title: sfo['TITLE'] ?? 'Unknown',
         contentId: sfo['CONTENT_ID'] ?? '',
@@ -102,31 +180,8 @@ class PkgReader {
         icon: icon,
       );
     } finally {
-      client.close(force: true);
+      await src.close();
     }
-  }
-
-  static Future<HttpClientResponse> _range(
-      HttpClient c, String url, int from, int to) async {
-    final req = await c.getUrl(Uri.parse(url));
-    req.headers.set(HttpHeaders.rangeHeader, 'bytes=$from-$to');
-    return req.close();
-  }
-
-  static Future<Uint8List> _bytes(
-      HttpClient c, String url, int from, int to) async {
-    final res = await _range(c, url, from, to);
-    if (res.statusCode != 206 && res.statusCode != 200) {
-      throw Exception('HTTP ${res.statusCode}');
-    }
-    final b = BytesBuilder();
-    await for (final chunk in res) {
-      b.add(chunk);
-      if (b.length > to - from + 1) break; // server ignored Range
-    }
-    final all = b.takeBytes();
-    final want = to - from + 1;
-    return all.length > want ? Uint8List.sublistView(all, 0, want) : all;
   }
 
   /// Minimal PARAM.SFO parser (little-endian).

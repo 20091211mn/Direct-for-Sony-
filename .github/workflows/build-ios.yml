@@ -1,0 +1,24 @@
+name: Build iOS
+# Manual only: macOS runners use 10x minutes on private repositories.
+on: workflow_dispatch
+jobs:
+  ios:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - run: flutter create . --platforms=ios
+      - run: python3 tool/patch_ios.py
+      - run: flutter pub get
+      - run: flutter build ios --release --no-codesign
+      - run: |
+          mkdir Payload
+          cp -R build/ios/iphoneos/Runner.app Payload/
+          zip -qry ps4-sender.ipa Payload
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ps4-sender-ipa
+          path: ps4-sender.ipa
