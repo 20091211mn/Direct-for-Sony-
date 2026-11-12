@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import 'services/keep_alive.dart';
 import 'services/pkg_info.dart';
 import 'services/ps4_sender.dart';
 
@@ -76,6 +77,7 @@ class _HomePageState extends State<HomePage> {
       return;
     }
     setState(() => _busy = true);
+    await KeepAlive.start();
     try {
       await Ps4Sender.send(
         ps4Ip: _ps4.text.trim(),
@@ -87,6 +89,7 @@ class _HomePageState extends State<HomePage> {
     } catch (e) {
       _log('Install failed: $e');
     } finally {
+      await KeepAlive.stop();
       setState(() => _busy = false);
     }
   }

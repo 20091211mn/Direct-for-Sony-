@@ -25,3 +25,8 @@ First version, untested on a real console. Known gaps:
 - `packageDigest` is a 64-zero placeholder (the original sends the PKG header digest).
 - No segmented mode / archives / file-host resolvers yet.
 - Proxy mode relays on the phone; no Android foreground service yet, keep the app open.
+
+## Background operation
+
+`native/` and `tool/patch_android.sh` add an Android foreground service (wake lock + Wi-Fi lock),
+applied by the GitHub Actions workflow after `flutter create`. It runs only while a transfer is active.
