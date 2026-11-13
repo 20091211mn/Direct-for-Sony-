@@ -2,6 +2,8 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'native_files.dart';
+
 /// Basic info read from a PS4 PKG (remote link or local file).
 class PkgInfo {
   PkgInfo({
@@ -12,14 +14,18 @@ class PkgInfo {
     required this.digest,
     this.url,
     this.localPath,
+    this.contentUri,
     this.icon,
   });
 
   /// Direct link (null when the package is a local file).
   final String? url;
 
-  /// Path of the picked file (null when the package is a link).
+  /// Path of the picked file (iPhone / copied file), null for links.
   final String? localPath;
+
+  /// Android content:// URI read in place through the native side (no copy).
+  final String? contentUri;
   final int size;
   final String title;
   final String contentId;
@@ -28,6 +34,8 @@ class PkgInfo {
   /// PKG header digest (32 bytes at 0xFE0) as upper-case hex.
   final String digest;
   final Uint8List? icon;
+
+  bool get isLocal => localPath != null || contentUri != null;
 
   /// Same rule the original tool uses: "PS4" + CATEGORY upper-case.
   String get bgftType => 'PS4${category.toUpperCase()}';
@@ -88,6 +96,26 @@ class _HttpSource implements _ByteSource {
   Future<void> close() async => _client.close(force: true);
 }
 
+class _ContentSource implements _ByteSource {
+  _ContentSource(this.uri, this.length);
+
+  final String uri;
+  final int length;
+
+  @override
+  Future<int> size() async {
+    if (length <= 0) throw Exception('Unknown file size');
+    return length;
+  }
+
+  @override
+  Future<Uint8List> read(int from, int toInclusive) =>
+      NativeFiles.read(uri, from, toInclusive - from + 1);
+
+  @override
+  Future<void> close() async {}
+}
+
 class _FileSource implements _ByteSource {
   _FileSource(this.path);
 
@@ -118,8 +146,11 @@ class PkgReader {
   static Future<PkgInfo> readFile(String path) =>
       _read(_FileSource(path), localPath: path);
 
+  static Future<PkgInfo> readContent(String uri, int size) =>
+      _read(_ContentSource(uri, size), contentUri: uri);
+
   static Future<PkgInfo> _read(_ByteSource src,
-      {String? url, String? localPath}) async {
+      {String? url, String? localPath, String? contentUri}) async {
     try {
       final size = await src.size();
 
@@ -172,6 +203,7 @@ class PkgReader {
       return PkgInfo(
         url: url,
         localPath: localPath,
+        contentUri: contentUri,
         size: size,
         title: sfo['TITLE'] ?? 'Unknown',
         contentId: sfo['CONTENT_ID'] ?? '',

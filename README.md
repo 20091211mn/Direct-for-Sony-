@@ -50,3 +50,12 @@ Every Android build is published as a GitHub Release (`v1.0.<run number>`, asset
 The app checks the latest release (gear icon > Check for updates), downloads the APK and opens the installer.
 Updates only install over the old app if every build is signed with the **same key**: store a keystore in the
 GitHub secret `ANDROID_KEYSTORE_BASE64` (alias `androiddebugkey`, password `android`). The repository must be public.
+
+## Queue, discovery, saved settings
+
+- Several packages (game + update + DLC) can be queued and sent in one go; each one has its own progress bar.
+- On Android the files are picked with the system document picker and read in place (no copy to the app cache).
+  On iPhone the system hands the app a copy of the file.
+- The radar button next to the PS4 IP scans the local /24 network for a PS4 with BinLoader (port 9090);
+  the next button tests the connection.
+- The PS4 IP, last link, language and switches are remembered.

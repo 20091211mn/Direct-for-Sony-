@@ -18,6 +18,7 @@ import 'dart:typed_data';
 
 import 'package:flutter/services.dart' show rootBundle;
 
+import 'native_files.dart';
 import 'pkg_info.dart';
 
 typedef Log = void Function(String message);
@@ -29,9 +30,14 @@ class SendController {
 }
 
 class _Stats {
-  int served = 0;
+  _Stats(int n) : served = List<int>.filled(n, 0);
+
+  /// Bytes sent to the PS4 for each package of the queue.
+  final List<int> served;
   int active = 0;
   DateTime last = DateTime.now();
+
+  int get total => served.fold(0, (a, b) => a + b);
 }
 
 class _Chunk {
@@ -72,112 +78,126 @@ class Ps4Sender {
   static Future<void> send({
     required String ps4Ip,
     required String phoneIp,
-    required PkgInfo pkg,
+    required List<PkgInfo> pkgs,
     required Log log,
     bool proxy = true,
     bool fast = true,
-    void Function(int served)? onProgress,
+    void Function(List<int> served)? onProgress,
     SendController? controller,
   }) async {
     ServerSocket? info;
     HttpServer? http;
     Timer? ticker;
-    final stats = _Stats();
+    final stats = _Stats(pkgs.length);
     final ctl = controller ?? SendController();
     _proxyLogged = 0;
     try {
-      // --- 1. HTTP server: manifest + proxy/file ------------------------
+      // --- 1. HTTP server: manifests + proxy/file --------------------------
       http = await HttpServer.bind(InternetAddress.anyIPv4, 0);
-      final isFile = pkg.localPath != null;
       final base = 'http://$phoneIp:${http.port}';
-      final String pieceUrl;
-      if (isFile) {
-        pieceUrl = '$base/file/0.pkg';
-      } else if (proxy) {
-        pieceUrl = '$base/proxy/?b64='
-            '${base64Url.encode(utf8.encode(pkg.url!)).replaceAll('=', '')}';
-      } else {
-        pieceUrl = pkg.url!;
-      }
-      final useServer = isFile || proxy;
 
-      // Fast mode: the phone fetches the package with several parallel Range
-      // requests (like the original "Segmented Downloads") and relays it.
-      final Uri? fastUri =
-          (proxy && !isFile && fast) ? await _probe(pkg.url!) : null;
-      if (proxy && !isFile && fast) {
-        log(fastUri != null
-            ? 'Fast mode: parallel connections'
+      // Which packages go through the phone (local files, or links in proxy mode)?
+      bool viaServer(PkgInfo p) => p.isLocal || proxy;
+      final needsServer = pkgs.any(viaServer);
+
+      // Fast mode: parallel Range requests, like the original "Segmented Downloads".
+      final fastUris = List<Uri?>.filled(pkgs.length, null);
+      if (proxy && fast) {
+        await Future.wait([
+          for (var i = 0; i < pkgs.length; i++)
+            if (!pkgs[i].isLocal)
+              _probe(pkgs[i].url!).then((u) => fastUris[i] = u),
+        ]);
+        final n = fastUris.where((u) => u != null).length;
+        log(n > 0
+            ? 'Fast mode: parallel connections ($n)'
             : 'Fast mode unavailable (server ignores ranges), using normal mode');
       }
 
-      final manifest = jsonEncode({
-        'originalFileSize': pkg.size,
-        // Same as the original tool: PKG header digest as upper-case hex.
-        'packageDigest': pkg.digest,
-        'numberOfSplitFiles': 1,
-        'pieces': [
-          {
-            'url': pieceUrl,
-            'fileOffset': 0,
-            'fileSize': pkg.size,
-            'hashValue': '0000000000000000000000000000000000000000',
-          }
-        ],
-      });
+      final manifests = <String>[];
+      for (var i = 0; i < pkgs.length; i++) {
+        final p = pkgs[i];
+        final String pieceUrl;
+        if (p.isLocal) {
+          pieceUrl = '$base/file/$i.pkg';
+        } else if (proxy) {
+          pieceUrl = '$base/proxy/$i?b64='
+              '${base64Url.encode(utf8.encode(p.url!)).replaceAll('=', '')}';
+        } else {
+          pieceUrl = p.url!;
+        }
+        manifests.add(jsonEncode({
+          'originalFileSize': p.size,
+          // Same as the original tool: PKG header digest as upper-case hex.
+          'packageDigest': p.digest,
+          'numberOfSplitFiles': 1,
+          'pieces': [
+            {
+              'url': pieceUrl,
+              'fileOffset': 0,
+              'fileSize': p.size,
+              'hashValue': '0000000000000000000000000000000000000000',
+            }
+          ],
+        }));
+      }
 
       http.listen((req) async {
         stats.last = DateTime.now();
-        final path = req.uri.path;
-        if (path.startsWith('/proxy') && !isFile) {
-          if (_proxyLogged++ < 6) {
-            log('PS4 ${req.method} /proxy '
-                '${req.headers.value(HttpHeaders.rangeHeader) ?? ''}');
-          }
-          final before = stats.served;
+        final seg = req.uri.pathSegments;
+        final head = seg.isEmpty ? '' : seg[0];
+        final idx =
+            seg.length > 1 ? (int.tryParse(seg[1].split('.').first) ?? -1) : -1;
+        if (idx < 0 || idx >= pkgs.length) {
+          req.response.statusCode = 404;
+          await req.response.close();
+          return;
+        }
+        final pkg = pkgs[idx];
+        final range = req.headers.value(HttpHeaders.rangeHeader) ?? '';
+
+        if (head == 'proxy' && !pkg.isLocal) {
+          if (_proxyLogged++ < 8) log('PS4 ${req.method} /proxy/$idx $range');
+          final before = stats.served[idx];
           stats.active++;
           try {
-            final fu = fastUri;
+            final fu = fastUris[idx];
             if (fu != null) {
-              await _proxyFast(req, fu, pkg.size, stats, log);
+              await _proxyFast(req, fu, pkg.size, stats, idx, log);
             } else {
-              await _proxy(req, stats, log);
+              await _proxy(req, stats, idx, log);
             }
           } finally {
             stats.active--;
             stats.last = DateTime.now();
           }
-          if (_proxyLogged <= 6) {
-            log('Proxy served ${stats.served - before} bytes');
+          if (_proxyLogged <= 8) {
+            log('Proxy served ${stats.served[idx] - before} bytes');
           }
-        } else if (path.startsWith('/file/') && isFile) {
-          if (_proxyLogged++ < 6) {
-            log('PS4 ${req.method} /file '
-                '${req.headers.value(HttpHeaders.rangeHeader) ?? ''}');
-          }
+        } else if (head == 'file' && pkg.isLocal) {
+          if (_proxyLogged++ < 8) log('PS4 ${req.method} /file/$idx $range');
           stats.active++;
           try {
-            await _serveFile(req, pkg.localPath!, stats, log);
+            await _serveLocal(req, pkg, stats, idx, log);
           } finally {
             stats.active--;
             stats.last = DateTime.now();
           }
-        } else if (path.startsWith('/json/')) {
-          log('PS4 ${req.method} ${req.uri.path}'
-              '${req.headers.value(HttpHeaders.rangeHeader) ?? ''}');
-          await _serveBytes(req, utf8.encode(manifest), 'application/json');
+        } else if (head == 'json') {
+          log('PS4 ${req.method} /json/$idx $range');
+          await _serveBytes(
+              req, utf8.encode(manifests[idx]), 'application/json');
         } else {
           req.response.statusCode = 404;
           await req.response.close();
         }
       });
-      final manifestUrl = '$base/json/0.json';
-      log('Manifest: $manifestUrl');
+      log('Server: $base');
 
       ticker = Timer.periodic(const Duration(milliseconds: 500),
-          (_) => onProgress?.call(stats.served));
+          (_) => onProgress?.call(List<int>.of(stats.served)));
 
-      // --- 2. info socket (the payload connects back here) --------------
+      // --- 2. info socket (the payload connects back here) ----------------
       info = await ServerSocket.bind(InternetAddress.anyIPv4, 0);
       final queue = StreamController<Socket>();
       info.listen(queue.add);
@@ -186,16 +206,22 @@ class Ps4Sender {
       // --- 3. send payload to BinLoader ---------------------------------
       await _sendPayload(ps4Ip, phoneIp, info.port, log);
 
-      // --- 4. wait for the payload, send package info -------------------
+      // --- 4. the payload asks for one package at a time ----------------
       log('Waiting for the PS4 payload...');
-      final client = await _next(incoming, const Duration(seconds: 15));
-      client.add(_infoBuffer(manifestUrl, pkg));
-      await client.flush();
-      await client.close();
-      log('Package info sent');
+      for (var i = 0; i < pkgs.length && !ctl.cancelled; i++) {
+        try {
+          final c = await _next(incoming, const Duration(seconds: 20));
+          c.add(_infoBuffer('$base/json/$i.json', pkgs[i]));
+          await c.flush();
+          await c.close();
+          log('Package ${i + 1}/${pkgs.length} sent: ${pkgs[i].title}');
+        } catch (e) {
+          log('The PS4 did not ask for package ${i + 1}: $e');
+          break;
+        }
+      }
 
-      // The payload loops asking for more packages. Send "0" to make it
-      // exit cleanly after this one.
+      // The payload keeps asking for more. Send "0" so it exits cleanly.
       try {
         final again = await _next(incoming, const Duration(seconds: 10));
         again.add(Uint8List(4));
@@ -203,28 +229,33 @@ class Ps4Sender {
         await again.close();
       } catch (_) {}
 
-      if (!useServer) {
-        // Direct mode: the PS4 downloads by itself; just let it fetch the manifest.
+      if (!needsServer) {
+        // Direct mode: the PS4 downloads by itself; just let it fetch the manifests.
         await Future<void>.delayed(const Duration(seconds: 5));
       } else {
-        log('Serving the package. Keep this app open until it ends.');
+        final totalSize = [
+          for (final p in pkgs)
+            if (viaServer(p)) p.size
+        ].fold<int>(0, (a, b) => a + b);
+        log('Serving the queue. Keep this app open until it ends.');
         while (!ctl.cancelled) {
           final idle = DateTime.now().difference(stats.last).inSeconds;
-          final done = stats.served >= pkg.size;
-          final limit = done ? 10 : (stats.served == 0 ? 120 : 60);
+          final done = stats.total >= totalSize;
+          final limit = done ? 10 : (stats.total == 0 ? 120 : 60);
           if ((stats.active == 0 && idle >= limit) || idle >= 300) break;
           await Future<void>.delayed(const Duration(milliseconds: 500));
         }
-        onProgress?.call(stats.served);
+        onProgress?.call(List<int>.of(stats.served));
         log(ctl.cancelled
             ? 'Stopped by user'
-            : 'Transferred ${stats.served ~/ (1024 * 1024)} MB');
+            : 'Transferred ${stats.total ~/ (1024 * 1024)} MB');
       }
       log('Done. Check the PS4 notifications / Downloads.');
     } finally {
       ticker?.cancel();
       await info?.close();
       await http?.close(force: true);
+      await NativeFiles.release();
     }
   }
 
@@ -255,7 +286,8 @@ class Ps4Sender {
 
   /// Relays the request to the origin (following redirects/HTTPS) and
   /// streams the answer back, keeping Range support.
-  static Future<void> _proxy(HttpRequest req, _Stats st, Log log) async {
+  static Future<void> _proxy(
+      HttpRequest req, _Stats st, int idx, Log log) async {
     final client = HttpClient()
       ..connectionTimeout = const Duration(seconds: 15)
       ..autoUncompress = false;
@@ -292,7 +324,7 @@ class Ps4Sender {
       } else {
         // addStream waits for the PS4 to consume data (no unbounded buffering).
         await req.response.addStream(res.map((chunk) {
-          st.served += chunk.length;
+          st.served[idx] += chunk.length;
           st.last = DateTime.now();
           return chunk;
         }));
@@ -399,7 +431,7 @@ class Ps4Sender {
 
   /// Serves the package to the PS4 using [_parallelRange].
   static Future<void> _proxyFast(
-      HttpRequest req, Uri uri, int size, _Stats st, Log log) async {
+      HttpRequest req, Uri uri, int size, _Stats st, int idx, Log log) async {
     final r = req.response;
     try {
       final range =
@@ -424,7 +456,7 @@ class Ps4Sender {
       if (req.method != 'HEAD') {
         await r.addStream(
             _parallelRange(uri, range.start, range.end).map((c) {
-          st.served += c.length;
+          st.served[idx] += c.length;
           st.last = DateTime.now();
           return c;
         }));
@@ -438,6 +470,19 @@ class Ps4Sender {
       try {
         await r.close();
       } catch (_) {}
+    }
+  }
+
+  /// Reads an Android content:// range in 1 MiB blocks through the native side.
+  static Stream<List<int>> _contentChunks(
+      String uri, int start, int end) async* {
+    var pos = start;
+    while (pos <= end) {
+      final n = math.min(1024 * 1024, end - pos + 1);
+      final b = await NativeFiles.read(uri, pos, n);
+      if (b.isEmpty) break;
+      pos += b.length;
+      yield b;
     }
   }
 
@@ -459,14 +504,14 @@ class Ps4Sender {
     }
   }
 
-  /// Serves a local file with Content-Length and Range support.
-  static Future<void> _serveFile(
-      HttpRequest req, String path, _Stats st, Log log) async {
+  /// Serves a local package (file path or content URI) with Range support.
+  static Future<void> _serveLocal(
+      HttpRequest req, PkgInfo pkg, _Stats st, int idx, Log log) async {
     final r = req.response;
     try {
-      final file = File(path);
-      final len = await file.length();
-      final range = _parseRange(req.headers.value(HttpHeaders.rangeHeader), len);
+      final len = pkg.size;
+      final range =
+          _parseRange(req.headers.value(HttpHeaders.rangeHeader), len);
       if (range == null) {
         r.statusCode = 416;
         r.headers.set(HttpHeaders.contentRangeHeader, 'bytes */$len');
@@ -485,8 +530,11 @@ class Ps4Sender {
       r.contentLength = range.end - range.start + 1;
       r.bufferOutput = false;
       if (req.method != 'HEAD') {
-        await r.addStream(_fileChunks(path, range.start, range.end).map((c) {
-          st.served += c.length;
+        final source = pkg.contentUri != null
+            ? _contentChunks(pkg.contentUri!, range.start, range.end)
+            : _fileChunks(pkg.localPath!, range.start, range.end);
+        await r.addStream(source.map((c) {
+          st.served[idx] += c.length;
           st.last = DateTime.now();
           return c;
         }));
