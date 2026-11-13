@@ -9,6 +9,10 @@ const int kBuildNumber = int.fromEnvironment('BUILD_NUMBER', defaultValue: 0);
 /// GitHub repository that publishes the releases (must be public).
 const String kRepo = '20091211mn/Direct-for-Sony-';
 
+/// SideStore / AltStore source published by the iOS workflow.
+const String kSourceUrl =
+    'https://github.com/$kRepo/releases/download/ios-latest/altstore.json';
+
 class UpdateInfo {
   UpdateInfo({
     required this.tag,

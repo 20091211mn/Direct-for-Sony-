@@ -17,7 +17,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          TAG=$(gh release list --repo "$GITHUB_REPOSITORY" -L 1 --json tagName -q '.[0].tagName' || true)
+          TAG=$(gh release list --repo "$GITHUB_REPOSITORY" -L 20 --json tagName,isPrerelease -q '[.[] | select(.isPrerelease==false)][0].tagName' || true)
           N="${TAG##*.}"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "n=${N:-0}" >> "$GITHUB_OUTPUT"
@@ -26,17 +26,31 @@ jobs:
       - run: flutter pub get
       - run: >
           flutter build ios --release --no-codesign
+          --build-name=1.0.${{ steps.ver.outputs.n }}
           --build-number=${{ steps.ver.outputs.n }}
           --dart-define=BUILD_NUMBER=${{ steps.ver.outputs.n }}
       - run: |
           mkdir Payload
           cp -R build/ios/iphoneos/Runner.app Payload/
           zip -qry ps4-sender.ipa Payload
-      - name: Attach IPA to the release
+      - name: Attach IPA to the latest release
         if: steps.ver.outputs.tag != ''
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload "${{ steps.ver.outputs.tag }}" ps4-sender.ipa --clobber --repo "$GITHUB_REPOSITORY"
+      - name: Publish the SideStore / AltStore source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          PLIST=build/ios/iphoneos/Runner.app/Info.plist
+          BUNDLE=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$PLIST")
+          VER=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$PLIST")
+          BUILD=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$PLIST")
+          python3 tool/make_source.py "$GITHUB_REPOSITORY" ps4-sender.ipa "$BUNDLE" "$VER" "$BUILD" altstore.json
+          gh release view ios-latest --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create ios-latest --repo "$GITHUB_REPOSITORY" --prerelease \
+              --title "iOS (latest)" --notes "Latest IPA and the SideStore/AltStore source"
+          gh release upload ios-latest ps4-sender.ipa altstore.json --clobber --repo "$GITHUB_REPOSITORY"
       - uses: actions/upload-artifact@v4
         with:
           name: ps4-sender-ipa

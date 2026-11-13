@@ -13,6 +13,9 @@ sed "s/^package .*/package $PKG/" native/MainActivity.kt > "$MA"
 sed "s/^package .*/package $PKG/" native/KeepAliveService.kt > "$DIR/KeepAliveService.kt"
 sed "s/^package .*/package $PKG/" native/UpdateFileProvider.kt > "$DIR/UpdateFileProvider.kt"
 
+# app icon (adaptive + legacy) and its background colour
+cp -r native/res/. android/app/src/main/res/
+
 mkdir -p android/app/src/main/res/xml
 cat > android/app/src/main/res/xml/ps4sender_file_paths.xml <<'XML'
 <?xml version="1.0" encoding="utf-8"?>
@@ -33,6 +36,16 @@ perms = "".join('<uses-permission android:name="android.permission.%s"/>' % n fo
 s = re.sub(r"(<manifest[^>]*>)", lambda m: m.group(1) + perms, s, count=1)
 svc = '<service android:name=".KeepAliveService" android:exported="false" android:foregroundServiceType="dataSync"/>'
 assert "</application>" in s
+assert "</activity>" in s
+share = ('<intent-filter><action android:name="android.intent.action.SEND"/>'
+         '<category android:name="android.intent.category.DEFAULT"/>'
+         '<data android:mimeType="text/plain"/></intent-filter>'
+         '<intent-filter><action android:name="android.intent.action.SEND"/>'
+         '<action android:name="android.intent.action.SEND_MULTIPLE"/>'
+         '<category android:name="android.intent.category.DEFAULT"/>'
+         '<data android:mimeType="application/octet-stream"/></intent-filter>')
+s = s.replace("</activity>", share + "</activity>", 1)
+s = s.replace('android:label="ps4_sender"', 'android:label="PS4 Sender"')
 s = s.replace("<application", '<application android:usesCleartextTraffic="true"', 1)
 prov = ('<provider android:name=".UpdateFileProvider" '
         'android:authorities="${applicationId}.fileprovider" '

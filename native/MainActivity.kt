@@ -1,6 +1,9 @@
 package com.example.ps4_sender
 
 import android.Manifest
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -24,6 +27,8 @@ class MainActivity : FlutterActivity() {
     private var pendingPick: MethodChannel.Result? = null
     private val channels = HashMap<String, FileChannel>()
     private val descriptors = ArrayList<ParcelFileDescriptor>()
+    private var shareChannel: MethodChannel? = null
+    private var initialShare: Map<String, Any>? = null
 
     @Synchronized
     private fun channelFor(uri: String): FileChannel {
@@ -42,6 +47,54 @@ class MainActivity : FlutterActivity() {
         for (d in descriptors) { try { d.close() } catch (_: Exception) {} }
         channels.clear()
         descriptors.clear()
+    }
+
+    /** Name and size of a content URI. */
+    private fun describe(u: Uri): Map<String, Any> {
+        var name = "file"
+        var size = 0L
+        try {
+            contentResolver.query(u, null, null, null, null)?.use { c ->
+                if (c.moveToFirst()) {
+                    val ni = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                    val si = c.getColumnIndex(OpenableColumns.SIZE)
+                    if (ni >= 0) name = c.getString(ni) ?: "file"
+                    if (si >= 0 && !c.isNull(si)) size = c.getLong(si)
+                }
+            }
+            if (size <= 0L) {
+                contentResolver.openFileDescriptor(u, "r")?.use { size = it.statSize }
+            }
+        } catch (_: Exception) {}
+        return mapOf("uri" to u.toString(), "name" to name, "size" to size)
+    }
+
+    /** Link or files received through the system "Share" menu. */
+    @Suppress("DEPRECATION")
+    private fun shareFrom(intent: Intent?): Map<String, Any>? {
+        if (intent == null) return null
+        val action = intent.action
+        if (action != Intent.ACTION_SEND && action != Intent.ACTION_SEND_MULTIPLE) return null
+        val text = intent.getStringExtra(Intent.EXTRA_TEXT) ?: ""
+        val uris = ArrayList<Uri>()
+        if (action == Intent.ACTION_SEND) {
+            val u = intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)
+            if (u != null) uris.add(u)
+        } else {
+            val list = intent.getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM)
+            if (list != null) uris.addAll(list)
+        }
+        if (text.isEmpty() && uris.isEmpty()) return null
+        val files = ArrayList<Map<String, Any>>()
+        for (u in uris) files.add(describe(u))
+        return mapOf("text" to text, "files" to files)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        val m = shareFrom(intent)
+        if (m != null) shareChannel?.invokeMethod("shared", m)
     }
 
     override fun onDestroy() {
@@ -70,24 +123,7 @@ class MainActivity : FlutterActivity() {
         if (uris.isEmpty() && single != null) uris.add(single)
 
         val out = ArrayList<Map<String, Any>>()
-        for (u in uris) {
-            var name = "file"
-            var size = 0L
-            try {
-                contentResolver.query(u, null, null, null, null)?.use { c ->
-                    if (c.moveToFirst()) {
-                        val ni = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-                        val si = c.getColumnIndex(OpenableColumns.SIZE)
-                        if (ni >= 0) name = c.getString(ni) ?: "file"
-                        if (si >= 0 && !c.isNull(si)) size = c.getLong(si)
-                    }
-                }
-                if (size <= 0L) {
-                    contentResolver.openFileDescriptor(u, "r")?.use { size = it.statSize }
-                }
-            } catch (_: Exception) {}
-            out.add(mapOf("uri" to u.toString(), "name" to name, "size" to size))
-        }
+        for (u in uris) out.add(describe(u))
         r.success(out)
     }
 
@@ -123,6 +159,34 @@ class MainActivity : FlutterActivity() {
                     }
                     "stop" -> {
                         stopService(Intent(this, KeepAliveService::class.java))
+                        result.success(true)
+                    }
+                    "progress" -> {
+                        val pct = call.argument<Number>("pct")?.toInt() ?: 0
+                        val text = call.argument<String>("text") ?: ""
+                        KeepAliveService.current?.update(pct, text)
+                        result.success(true)
+                    }
+                    "done" -> {
+                        val text = call.argument<String>("text") ?: ""
+                        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                        val b: Notification.Builder
+                        if (Build.VERSION.SDK_INT >= 26) {
+                            nm.createNotificationChannel(
+                                NotificationChannel(
+                                    "ps4sender_done", "PS4 Sender (finished)",
+                                    NotificationManager.IMPORTANCE_DEFAULT
+                                )
+                            )
+                            b = Notification.Builder(this, "ps4sender_done")
+                        } else {
+                            b = Notification.Builder(this)
+                        }
+                        b.setContentTitle("PS4 Sender")
+                            .setContentText(text)
+                            .setSmallIcon(android.R.drawable.stat_sys_download_done)
+                            .setAutoCancel(true)
+                        nm.notify(2, b.build())
                         result.success(true)
                     }
                     else -> result.notImplemented()
@@ -173,6 +237,19 @@ class MainActivity : FlutterActivity() {
                     else -> result.notImplemented()
                 }
             }
+
+        val sc = MethodChannel(messenger, "ps4sender/share")
+        shareChannel = sc
+        initialShare = shareFrom(intent)
+        sc.setMethodCallHandler { call, result ->
+            if (call.method == "initial") {
+                val m = initialShare
+                initialShare = null
+                result.success(m)
+            } else {
+                result.notImplemented()
+            }
+        }
 
         MethodChannel(messenger, "ps4sender/updater")
             .setMethodCallHandler { call, result ->

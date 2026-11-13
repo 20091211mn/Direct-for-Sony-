@@ -15,6 +15,7 @@ class PkgInfo {
     this.url,
     this.localPath,
     this.contentUri,
+    this.rangeOk = true,
     this.icon,
   });
 
@@ -35,13 +36,38 @@ class PkgInfo {
   final String digest;
   final Uint8List? icon;
 
+  /// False when the server ignores Range requests (no resume, no fast mode).
+  final bool rangeOk;
+
   bool get isLocal => localPath != null || contentUri != null;
 
   /// Same rule the original tool uses: "PS4" + CATEGORY upper-case.
   String get bgftType => 'PS4${category.toUpperCase()}';
 }
 
+/// A problem with a link or file; the UI turns the [code] into a clear message.
+/// Codes: invalid_url, html_page, forbidden, not_found, server_error,
+/// no_size, archive, not_pkg.
+class PkgError implements Exception {
+  PkgError(this.code, [this.detail = '']);
+
+  final String code;
+  final String detail;
+
+  @override
+  String toString() =>
+      'PkgError($code${detail.isEmpty ? '' : ': $detail'})';
+}
+
+PkgError? _statusError(int code) {
+  if (code == 200 || code == 206 || code == 416) return null;
+  if (code == 401 || code == 403) return PkgError('forbidden', '$code');
+  if (code == 404 || code == 410) return PkgError('not_found', '$code');
+  return PkgError('server_error', '$code');
+}
+
 abstract class _ByteSource {
+  bool get rangeOk;
   Future<int> size();
   Future<Uint8List> read(int from, int toInclusive);
   Future<void> close();
@@ -54,6 +80,10 @@ class _HttpSource implements _ByteSource {
   final HttpClient _client = HttpClient()
     ..connectionTimeout = const Duration(seconds: 15);
   int? _size;
+  bool _rangeOk = true;
+
+  @override
+  bool get rangeOk => _rangeOk;
 
   Future<HttpClientResponse> _range(int from, int to) async {
     final req = await _client.getUrl(Uri.parse(url));
@@ -65,6 +95,16 @@ class _HttpSource implements _ByteSource {
   Future<int> size() async {
     if (_size != null) return _size!;
     final probe = await _range(0, 0);
+    final bad = _statusError(probe.statusCode);
+    if (bad != null) {
+      await probe.drain<void>();
+      throw bad;
+    }
+    if ((probe.headers.contentType?.mimeType ?? '') == 'text/html') {
+      await probe.drain<void>();
+      throw PkgError('html_page');
+    }
+    _rangeOk = probe.statusCode == 206;
     final cr = probe.headers.value('content-range');
     int? size;
     if (cr != null && cr.contains('/')) {
@@ -72,16 +112,15 @@ class _HttpSource implements _ByteSource {
     }
     size ??= probe.contentLength > 0 ? probe.contentLength : null;
     await probe.drain<void>();
-    if (size == null) throw Exception('Server did not report the file size');
+    if (size == null) throw PkgError('no_size');
     return _size = size;
   }
 
   @override
   Future<Uint8List> read(int from, int toInclusive) async {
     final res = await _range(from, toInclusive);
-    if (res.statusCode != 206 && res.statusCode != 200) {
-      throw Exception('HTTP ${res.statusCode}');
-    }
+    final bad = _statusError(res.statusCode);
+    if (bad != null) throw bad;
     final want = toInclusive - from + 1;
     final b = BytesBuilder();
     await for (final chunk in res) {
@@ -101,6 +140,9 @@ class _ContentSource implements _ByteSource {
 
   final String uri;
   final int length;
+
+  @override
+  bool get rangeOk => true;
 
   @override
   Future<int> size() async {
@@ -123,6 +165,9 @@ class _FileSource implements _ByteSource {
   RandomAccessFile? _raf;
 
   @override
+  bool get rangeOk => true;
+
+  @override
   Future<int> size() => File(path).length();
 
   @override
@@ -140,8 +185,15 @@ class PkgReader {
   static const _entryParamSfo = 0x1000;
   static const _entryIcon0 = 0x1200;
 
-  static Future<PkgInfo> readUrl(String url) =>
-      _read(_HttpSource(url), url: url);
+  static Future<PkgInfo> readUrl(String url) async {
+    final u = Uri.tryParse(url);
+    if (u == null ||
+        !(u.scheme == 'http' || u.scheme == 'https') ||
+        u.host.isEmpty) {
+      throw PkgError('invalid_url');
+    }
+    return _read(_HttpSource(url), url: url);
+  }
 
   static Future<PkgInfo> readFile(String path) =>
       _read(_FileSource(path), localPath: path);
@@ -156,8 +208,17 @@ class PkgReader {
 
       final head = await src.read(0, 0xFFFF);
       final bd = ByteData.sublistView(head);
+      if (head.length >= 4) {
+        if (head[0] == 0x50 && head[1] == 0x4B) throw PkgError('archive', 'zip');
+        if (head[0] == 0x52 && head[1] == 0x61 && head[2] == 0x72 && head[3] == 0x21) {
+          throw PkgError('archive', 'rar');
+        }
+        if (head[0] == 0x37 && head[1] == 0x7A && head[2] == 0xBC && head[3] == 0xAF) {
+          throw PkgError('archive', '7z');
+        }
+      }
       if (head.length < 0x40 || bd.getUint32(0, Endian.big) != 0x7F434E54) {
-        throw Exception('Not a PS4 PKG (bad magic)');
+        throw PkgError('not_pkg', 'bad magic');
       }
       final count = bd.getUint32(0x10, Endian.big);
       final tableOff = bd.getUint32(0x18, Endian.big);
@@ -178,7 +239,7 @@ class PkgReader {
         }
       }
       if (sfoOff == null || sfoLen == null) {
-        throw Exception('PARAM.SFO not found in PKG');
+        throw PkgError('not_pkg', 'PARAM.SFO not found');
       }
 
       final sfo = _parseSfo(await src.read(sfoOff, sfoOff + sfoLen - 1));
@@ -204,6 +265,7 @@ class PkgReader {
         url: url,
         localPath: localPath,
         contentUri: contentUri,
+        rangeOk: src.rangeOk,
         size: size,
         title: sfo['TITLE'] ?? 'Unknown',
         contentId: sfo['CONTENT_ID'] ?? '',

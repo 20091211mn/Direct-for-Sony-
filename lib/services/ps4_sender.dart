@@ -217,6 +217,7 @@ class Ps4Sender {
           log('Package ${i + 1}/${pkgs.length} sent: ${pkgs[i].title}');
         } catch (e) {
           log('The PS4 did not ask for package ${i + 1}: $e');
+          if (i == 0) rethrow;
           break;
         }
       }

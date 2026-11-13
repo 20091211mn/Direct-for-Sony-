@@ -86,6 +86,11 @@ class _SettingsPageState extends State<SettingsPage> {
     }
   }
 
+  Future<void> _copySource() async {
+    await Clipboard.setData(const ClipboardData(text: kSourceUrl));
+    if (mounted) setState(() => _message = t('Source link copied.', 'تم نسخ رابط المصدر.'));
+  }
+
   Future<void> _copyIpa() async {
     final url = _update?.ipaUrl ?? _update?.pageUrl ?? '';
     await Clipboard.setData(ClipboardData(text: url));
@@ -158,8 +163,8 @@ class _SettingsPageState extends State<SettingsPage> {
                             ),
                         ] else ...[
                           Text(t(
-                              'On iPhone, install the new IPA again with SideStore/AltStore.',
-                              'على الآيفون: ثبّت ملف IPA الجديد من جديد عبر SideStore/AltStore.')),
+                              'Open SideStore / AltStore, go to My Apps and press Update.',
+                              'افتح SideStore أو AltStore ثم "تطبيقاتي" واضغط تحديث.')),
                           const SizedBox(height: 8),
                           FilledButton.icon(
                             onPressed: _copyIpa,
@@ -170,6 +175,25 @@ class _SettingsPageState extends State<SettingsPage> {
                       ],
                     ),
                   ),
+                ),
+              ],
+              if (!Platform.isAndroid) ...[
+                const SizedBox(height: 24),
+                Text(t('One-tap updates on iPhone', 'تحديث بنقرة على الآيفون'),
+                    style: Theme.of(context).textTheme.titleSmall),
+                const SizedBox(height: 6),
+                Text(t(
+                    'Add this source once in SideStore / AltStore (Sources > +). New versions then appear in the app and install with one tap.',
+                    'أضف هذا المصدر مرة واحدة في SideStore أو AltStore (Sources ثم +). بعدها تظهر الإصدارات الجديدة هناك وتُثبَّت بنقرة.')),
+                const SizedBox(height: 8),
+                SelectableText(kSourceUrl,
+                    textDirection: TextDirection.ltr,
+                    style: const TextStyle(fontFamily: 'monospace', fontSize: 12)),
+                const SizedBox(height: 8),
+                FilledButton.tonalIcon(
+                  onPressed: _copySource,
+                  icon: const Icon(Icons.copy),
+                  label: Text(t('Copy source link', 'نسخ رابط المصدر')),
                 ),
               ],
               if (_message != null) ...[

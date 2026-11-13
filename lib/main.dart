@@ -1,3 +1,5 @@
+import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
 
@@ -10,9 +12,11 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 import 'services/discovery.dart';
 import 'services/keep_alive.dart';
 import 'services/native_files.dart';
+import 'services/net_check.dart';
 import 'services/pkg_info.dart';
 import 'services/progress.dart';
 import 'services/ps4_sender.dart';
+import 'services/share_intake.dart';
 import 'services/updater.dart';
 import 'settings_page.dart';
 
@@ -104,6 +108,12 @@ class _HomePageState extends State<HomePage> {
   SendController? _ctl;
   UpdateInfo? _update;
   SharedPreferences? _prefs;
+  int _lastPct = -1;
+  List<Map<String, String>> _history = [];
+  String? _error;
+  bool _hasCellular = false;
+  bool _warnedCellular = false;
+  DateTime _lastNotif = DateTime.fromMillisecondsSinceEpoch(0);
 
   String t(String en, String ar) => _ar ? ar : en;
 
@@ -113,7 +123,10 @@ class _HomePageState extends State<HomePage> {
     Ps4Sender.localIp().then((ip) {
       if (mounted) setState(() => _phoneIp = ip);
     });
-    _loadPrefs();
+    _loadPrefs().then((_) => _initShare());
+    NetCheck.hasCellular().then((v) {
+      if (mounted) setState(() => _hasCellular = v);
+    });
     _clearPickerCache();
     _checkUpdate();
   }
@@ -139,6 +152,12 @@ class _HomePageState extends State<HomePage> {
         _proxy = p.getBool('proxy') ?? true;
         _fast = p.getBool('fast') ?? true;
         _source = p.getString('source') == 'file' ? Source.file : Source.link;
+        final raw = p.getString('history');
+        if (raw != null) {
+          _history = (jsonDecode(raw) as List)
+              .map((e) => Map<String, String>.from(e as Map))
+              .toList();
+        }
       });
     } catch (_) {}
   }
@@ -203,6 +222,92 @@ class _HomePageState extends State<HomePage> {
     final h = m ~/ 60;
     final mm = m % 60;
     return t('About $h h $mm min left', 'متبقي حوالي $h ساعة و$mm دقيقة');
+  }
+
+  // ------------------------------------------------------------ share / paste
+
+  Future<void> _initShare() async {
+    ShareIntake.listen(_onShare);
+    final m = await ShareIntake.initial();
+    if (m != null) await _onShare(m);
+  }
+
+  /// A link or files sent from another app with "Share" (Android).
+  Future<void> _onShare(Map<dynamic, dynamic> m) async {
+    if (_sending) {
+      _snack(t('Busy sending, try again after it ends.',
+          'جارٍ الإرسال، أعد المحاولة بعد انتهائه.'));
+      return;
+    }
+    final text = (m['text'] ?? '') as String;
+    final files = (m['files'] as List?) ?? const [];
+    final links = RegExp(r'https?://\S+')
+        .allMatches(text)
+        .map((x) => x.group(0)!)
+        .toSet()
+        .toList();
+    if (links.isEmpty && files.isEmpty) return;
+    _snack(t('Adding shared items…', 'جارٍ إضافة العناصر المشاركة…'));
+    if (links.isNotEmpty) {
+      setState(() {
+        _source = Source.link;
+        _url.text = links.first;
+      });
+      for (final l in links) {
+        if (_queue.any((p) => p.url == l)) continue;
+        final pkg = await _read(() => PkgReader.readUrl(l));
+        if (pkg != null) _rememberLink(pkg);
+      }
+      _save();
+    }
+    if (files.isNotEmpty) {
+      setState(() => _source = Source.file);
+      for (final f in files) {
+        final fm = Map<String, dynamic>.from(f as Map);
+        final uri = fm['uri'] as String;
+        final size = ((fm['size'] ?? 0) as num).toInt();
+        await _read(() => PkgReader.readContent(uri, size));
+      }
+    }
+  }
+
+  Future<void> _paste() async {
+    final d = await Clipboard.getData(Clipboard.kTextPlain);
+    final m = RegExp(r'https?://\S+').firstMatch(d?.text ?? '');
+    if (m == null) {
+      _snack(t('No link in the clipboard', 'لا يوجد رابط في الحافظة'));
+      return;
+    }
+    setState(() => _url.text = m.group(0)!);
+    _save();
+  }
+
+  // ------------------------------------------------------- progress / notify
+
+  ({int total, int done}) _totals() {
+    var total = 0;
+    var done = 0;
+    for (var i = 0; i < _queue.length; i++) {
+      final p = _queue[i];
+      if (!_viaServer(p)) continue;
+      total += p.size;
+      done += math.min(i < _served.length ? _served[i] : 0, p.size);
+    }
+    return (total: total, done: done);
+  }
+
+  /// Updates the Android notification (at most once per second).
+  void _notifyProgress() {
+    final r = _totals();
+    if (r.total == 0) return;
+    final pct = r.done * 100 ~/ r.total;
+    final now = DateTime.now();
+    if (now.difference(_lastNotif).inMilliseconds < 1000) return;
+    if (pct == _lastPct && now.difference(_lastNotif).inSeconds < 10) return;
+    _lastPct = pct;
+    _lastNotif = now;
+    final eta = _meter.eta(r.total, r.done);
+    ForegroundKeeper.progress(pct, eta == null ? '$pct%' : '$pct% · ${_fmtEta(eta)}');
   }
 
   // -------------------------------------------------------------- PS4 finder
@@ -272,17 +377,226 @@ class _HomePageState extends State<HomePage> {
       ..showSnackBar(SnackBar(content: Text(m)));
   }
 
+  // ------------------------------------------------------- history / errors
+
+  void _saveHistory() {
+    _prefs?.setString('history', jsonEncode(_history));
+  }
+
+  void _rememberLink(PkgInfo pkg) {
+    final url = pkg.url;
+    if (url == null) return;
+    setState(() {
+      _history.removeWhere((h) => h['url'] == url);
+      _history.insert(0, {'url': url, 'title': pkg.title});
+      if (_history.length > 30) _history = _history.sublist(0, 30);
+    });
+    _saveHistory();
+  }
+
+  Future<void> _showHistory() async {
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSheet) => SafeArea(
+          child: Directionality(
+            textDirection: _ar ? TextDirection.rtl : TextDirection.ltr,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                ListTile(
+                  title: Text(t('Recent links', 'الروابط الأخيرة'),
+                      style: Theme.of(ctx).textTheme.titleMedium),
+                  trailing: _history.isEmpty
+                      ? null
+                      : TextButton(
+                          onPressed: () {
+                            setState(() => _history = []);
+                            _saveHistory();
+                            setSheet(() {});
+                          },
+                          child: Text(t('Clear all', 'مسح الكل')),
+                        ),
+                ),
+                if (_history.isEmpty)
+                  Padding(
+                    padding: const EdgeInsets.all(24),
+                    child: Text(t('No saved links yet.', 'لا توجد روابط محفوظة بعد.')),
+                  )
+                else
+                  Flexible(
+                    child: ListView(
+                      shrinkWrap: true,
+                      children: [
+                        for (final h in _history)
+                          ListTile(
+                            leading: const Icon(Icons.history),
+                            title: Text(h['title'] ?? h['url'] ?? '',
+                                maxLines: 1, overflow: TextOverflow.ellipsis),
+                            subtitle: Text(h['url'] ?? '',
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                textDirection: TextDirection.ltr),
+                            onTap: () {
+                              Navigator.pop(ctx);
+                              _url.text = h['url'] ?? '';
+                              _addLink();
+                            },
+                            trailing: IconButton(
+                              icon: const Icon(Icons.delete_outline),
+                              onPressed: () {
+                                setState(() => _history.remove(h));
+                                _saveHistory();
+                                setSheet(() {});
+                              },
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Turns a failure into a clear message in the current language.
+  String _explain(Object e) {
+    if (e is PkgError) {
+      switch (e.code) {
+        case 'invalid_url':
+          return t('This is not a valid link. It must start with http:// or https://.',
+              'هذا ليس رابطاً صالحاً. يجب أن يبدأ بـ http:// أو https://.');
+        case 'html_page':
+          return t('The link opens a web page, not the PKG file. Use the direct download link.',
+              'الرابط يفتح صفحة ويب وليس ملف PKG. استخدم رابط التحميل المباشر.');
+        case 'forbidden':
+          return t('The server refused access (the link expired or needs a login). Get a fresh link.',
+              'السيرفر رفض الوصول (انتهت صلاحية الرابط أو يحتاج تسجيل دخول). احصل على رابط جديد.');
+        case 'not_found':
+          return t('The file was not found (404). Check the link.',
+              'الملف غير موجود (404). تحقق من الرابط.');
+        case 'server_error':
+          return t('The server returned an error (${e.detail}). Try again later.',
+              'السيرفر أرجع خطأ (${e.detail}). حاول لاحقاً.');
+        case 'no_size':
+          return t('The server did not report the file size, so it cannot be used.',
+              'السيرفر لم يرسل حجم الملف، فلا يمكن استخدامه.');
+        case 'archive':
+          return t('This is a compressed archive (${e.detail}). Extract it and use the .pkg file.',
+              'هذا ملف مضغوط (${e.detail}). فك الضغط واستخدم ملف .pkg.');
+        case 'not_pkg':
+          return t('This is not a PS4 PKG file (${e.detail}).',
+              'هذا ليس ملف PS4 PKG (${e.detail}).');
+      }
+    }
+    if (e is SocketException) {
+      return t('Cannot reach the server. Check the internet connection and the link.',
+          'تعذّر الاتصال بالسيرفر. تحقق من الإنترنت ومن الرابط.');
+    }
+    if (e is TimeoutException) {
+      return t('The connection timed out.', 'انتهت مهلة الاتصال.');
+    }
+    if (e is TlsException) {
+      return t('There is a problem with the HTTPS certificate of this site.',
+          'توجد مشكلة في شهادة HTTPS لهذا الموقع.');
+    }
+    return e.toString();
+  }
+
+  /// Same for failures while sending to the PS4.
+  String _explainSend(Object e) {
+    final s = e.toString();
+    if (s.contains('Could not reach BinLoader')) {
+      return t('Cannot reach the PS4. Enable GoldHEN > Servers > BinLoader and check the IP.',
+          'تعذّر الوصول إلى الـ PS4. فعّل GoldHEN > Servers > BinLoader وتحقق من العنوان.');
+    }
+    if (e is TimeoutException) {
+      return t('The PS4 payload did not connect back to the phone. Make sure both are on the same Wi-Fi and that the router does not isolate devices (AP isolation).',
+          'الـ payload على الـ PS4 لم يتصل بالجوال. تأكد أنهما على نفس الواي فاي وأن الراوتر لا يعزل الأجهزة (AP isolation).');
+    }
+    return _explain(e);
+  }
+
+  /// Checks before sending. Returns false when the user cancels.
+  Future<bool> _preflight(String phone, String ps4) async {
+    if (!NetCheck.validIpv4(ps4)) {
+      _snack(t('The PS4 IP is not valid (example: 192.168.1.20).',
+          'عنوان الـ PS4 غير صالح (مثال: 192.168.1.20).'));
+      return false;
+    }
+    final warns = <String>[];
+    if (!NetCheck.sameLan(phone, ps4)) {
+      warns.add(t(
+          'The phone ($phone) and the PS4 ($ps4) look like they are on different networks. Both must be on the same Wi-Fi.',
+          'الجوال ($phone) والـ PS4 ($ps4) يبدوان على شبكتين مختلفتين. يجب أن يكونا على نفس الواي فاي.'));
+    }
+    final cell = await NetCheck.hasCellular();
+    if (mounted) setState(() => _hasCellular = cell);
+    final proxiedLinks = _proxy && _queue.any((p) => !p.isLocal);
+    if (proxiedLinks && cell && !_warnedCellular) {
+      warns.add(t(
+          'The download goes through this phone. If the Wi-Fi has no internet it may use your mobile data plan.',
+          'التحميل يمر عبر هذا الجوال. إذا كان الواي فاي بدون إنترنت فقد يستهلك من باقة بيانات الجوال.'));
+    }
+    if (warns.isEmpty) return true;
+    final go = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => Directionality(
+        textDirection: _ar ? TextDirection.rtl : TextDirection.ltr,
+        child: AlertDialog(
+          title: Text(t('Before sending', 'قبل الإرسال')),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              for (final w in warns)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: Text('• $w'),
+                ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: Text(t('Cancel', 'إلغاء')),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: Text(t('Send anyway', 'إرسال على أي حال')),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (go == true) _warnedCellular = true;
+    return go ?? false;
+  }
+
   // ------------------------------------------------------------------ queue
 
-  Future<void> _read(Future<PkgInfo> Function() read) async {
-    setState(() => _loading = true);
+  Future<PkgInfo?> _read(Future<PkgInfo> Function() read) async {
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
     try {
       final pkg = await read();
-      if (!mounted) return;
+      if (!mounted) return null;
       setState(() => _queue.add(pkg));
       _log('Added: ${pkg.title} (${pkg.contentId}), ${pkg.size} bytes');
+      if (!pkg.rangeOk && !pkg.isLocal) {
+        _log('Note: this server does not support resume (fast mode will not work for it).');
+      }
+      return pkg;
     } catch (e) {
       _log('Load failed: $e');
+      if (mounted) setState(() => _error = _explain(e));
+      return null;
     } finally {
       if (mounted) setState(() => _loading = false);
     }
@@ -296,7 +610,8 @@ class _HomePageState extends State<HomePage> {
       return;
     }
     _save();
-    await _read(() => PkgReader.readUrl(url));
+    final pkg = await _read(() => PkgReader.readUrl(url));
+    if (pkg != null) _rememberLink(pkg);
   }
 
   Future<void> _addFiles() async {
@@ -320,7 +635,20 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-  void _removeAt(int i) => setState(() => _queue.removeAt(i));
+  void _removeAt(int i) => setState(() {
+        _queue.removeAt(i);
+        _served = [];
+      });
+
+  void _reorder(int oldIndex, int newIndex) {
+    if (_sending) return;
+    setState(() {
+      if (newIndex > oldIndex) newIndex -= 1;
+      final item = _queue.removeAt(oldIndex);
+      _queue.insert(newIndex, item);
+      _served = [];
+    });
+  }
 
   Future<void> _clearQueue() async {
     setState(() {
@@ -346,10 +674,13 @@ class _HomePageState extends State<HomePage> {
       _snack(t('Enter the PS4 IP first', 'اكتب عنوان الـ PS4 أولاً'));
       return;
     }
+    if (!await _preflight(phone, ps4)) return;
     _save();
     final ctl = SendController();
     _ctl = ctl;
     _meter = SpeedMeter();
+    _lastPct = -1;
+    _lastNotif = DateTime.fromMillisecondsSinceEpoch(0);
     final pkgs = List<PkgInfo>.of(_queue);
     setState(() {
       _sending = true;
@@ -371,15 +702,22 @@ class _HomePageState extends State<HomePage> {
         onProgress: (served) {
           _meter.add(served.fold<int>(0, (a, b) => a + b));
           if (mounted) setState(() => _served = served);
+          _notifyProgress();
         },
       );
     } catch (e) {
       _log('Install failed: $e');
+      if (mounted) setState(() => _error = _explainSend(e));
     } finally {
       await ForegroundKeeper.stop();
       try {
         await WakelockPlus.disable();
       } catch (_) {}
+      final r = _totals();
+      if (!ctl.cancelled && r.total > 0 && r.done >= r.total) {
+        await ForegroundKeeper.finished(
+            t('Transfer complete', 'اكتمل النقل'));
+      }
       if (mounted) setState(() => _sending = false);
     }
   }
@@ -407,11 +745,34 @@ class _HomePageState extends State<HomePage> {
             isThreeLine: true,
             trailing: _sending
                 ? null
-                : IconButton(
-                    icon: const Icon(Icons.close),
-                    onPressed: () => _removeAt(i),
+                : Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      IconButton(
+                        icon: const Icon(Icons.close),
+                        onPressed: () => _removeAt(i),
+                      ),
+                      ReorderableDragStartListener(
+                        index: i,
+                        child: const Padding(
+                          padding: EdgeInsets.all(8),
+                          child: Icon(Icons.drag_handle),
+                        ),
+                      ),
+                    ],
                   ),
           ),
+          if (!p.isLocal && !p.rangeOk)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+              child: Align(
+                alignment: AlignmentDirectional.centerStart,
+                child: Text(
+                  '⚠ ${t('No resume support on this server (no fast mode)', 'السيرفر لا يدعم الاستئناف (بدون الوضع السريع)')}',
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+              ),
+            ),
           if (showBar)
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
@@ -425,14 +786,9 @@ class _HomePageState extends State<HomePage> {
   }
 
   Widget _progressCard(ColorScheme cs) {
-    var total = 0;
-    var done = 0;
-    for (var i = 0; i < _queue.length; i++) {
-      final p = _queue[i];
-      if (!_viaServer(p)) continue;
-      total += p.size;
-      done += math.min(i < _served.length ? _served[i] : 0, p.size);
-    }
+    final totals = _totals();
+    final total = totals.total;
+    final done = totals.done;
     if (total == 0) {
       return Card(
         color: cs.surfaceContainerHigh,
@@ -603,6 +959,21 @@ class _HomePageState extends State<HomePage> {
                   decoration: InputDecoration(
                     labelText: t('Direct PKG URL', 'رابط PKG مباشر'),
                     prefixIcon: const Icon(Icons.link),
+                    suffixIcon: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        IconButton(
+                          tooltip: t('Recent links', 'الروابط الأخيرة'),
+                          icon: const Icon(Icons.history),
+                          onPressed: _sending ? null : _showHistory,
+                        ),
+                        IconButton(
+                          tooltip: t('Paste', 'لصق'),
+                          icon: const Icon(Icons.content_paste),
+                          onPressed: _sending ? null : _paste,
+                        ),
+                      ],
+                    ),
                     border: const OutlineInputBorder(),
                   ),
                 ),
@@ -638,6 +1009,15 @@ class _HomePageState extends State<HomePage> {
                             _save();
                           },
                   ),
+                if (_proxy && _hasCellular)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 8),
+                    child: Text(
+                      t('Note: the proxy uses this phone internet. If the Wi-Fi has no internet it may use your mobile data plan.',
+                          'ملاحظة: الـ Proxy يستخدم إنترنت هذا الجوال. إذا كان الواي فاي بدون إنترنت فقد يستهلك من باقة بياناتك.'),
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ),
                 FilledButton.tonalIcon(
                   onPressed: busy ? null : _addLink,
                   icon: const Icon(Icons.playlist_add),
@@ -664,6 +1044,22 @@ class _HomePageState extends State<HomePage> {
                   padding: EdgeInsets.only(top: 12),
                   child: LinearProgressIndicator(),
                 ),
+              if (_error != null)
+                Padding(
+                  padding: const EdgeInsets.only(top: 12),
+                  child: Card(
+                    color: cs.errorContainer,
+                    child: ListTile(
+                      leading: Icon(Icons.error_outline, color: cs.onErrorContainer),
+                      title: Text(_error!,
+                          style: TextStyle(color: cs.onErrorContainer)),
+                      trailing: IconButton(
+                        icon: Icon(Icons.close, color: cs.onErrorContainer),
+                        onPressed: () => setState(() => _error = null),
+                      ),
+                    ),
+                  ),
+                ),
               if (_queue.isNotEmpty) ...[
                 const SizedBox(height: 16),
                 Row(children: [
@@ -680,7 +1076,19 @@ class _HomePageState extends State<HomePage> {
                       label: Text(t('Clear', 'مسح الكل')),
                     ),
                 ]),
-                for (var i = 0; i < _queue.length; i++) _queueTile(i, cs),
+                ReorderableListView(
+                  shrinkWrap: true,
+                  physics: const NeverScrollableScrollPhysics(),
+                  buildDefaultDragHandles: false,
+                  onReorder: _reorder,
+                  children: [
+                    for (var i = 0; i < _queue.length; i++)
+                      KeyedSubtree(
+                        key: ObjectKey(_queue[i]),
+                        child: _queueTile(i, cs),
+                      ),
+                  ],
+                ),
                 const SizedBox(height: 12),
                 Row(children: [
                   Expanded(
