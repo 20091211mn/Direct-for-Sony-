@@ -43,3 +43,10 @@ applied by the GitHub Actions workflow after `flutter create`. It runs only whil
 `.github/workflows/build-ios.yml` builds an unsigned `ps4-sender.ipa` (run it manually).
 It must be signed/sideloaded (for example with AltStore or Sideloadly). iOS suspends apps in
 the background, so keep the app open with the screen on while sending.
+
+## Updates
+
+Every Android build is published as a GitHub Release (`v1.0.<run number>`, asset `ps4-sender.apk`).
+The app checks the latest release (gear icon > Check for updates), downloads the APK and opens the installer.
+Updates only install over the old app if every build is signed with the **same key**: store a keystore in the
+GitHub secret `ANDROID_KEYSTORE_BASE64` (alias `androiddebugkey`, password `android`). The repository must be public.

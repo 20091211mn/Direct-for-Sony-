@@ -1,6 +1,8 @@
 name: Build iOS
-# Manual only: macOS runners use 10x minutes on private repositories.
+# Manual only. Run it after an Android build: it reuses the latest release number.
 on: workflow_dispatch
+permissions:
+  contents: write
 jobs:
   ios:
     runs-on: macos-latest
@@ -10,14 +12,31 @@ jobs:
         with:
           channel: stable
           cache: true
+      - name: Find latest release
+        id: ver
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG=$(gh release list --repo "$GITHUB_REPOSITORY" -L 1 --json tagName -q '.[0].tagName' || true)
+          N="${TAG##*.}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "n=${N:-0}" >> "$GITHUB_OUTPUT"
       - run: flutter create . --platforms=ios
       - run: python3 tool/patch_ios.py
       - run: flutter pub get
-      - run: flutter build ios --release --no-codesign
+      - run: >
+          flutter build ios --release --no-codesign
+          --build-number=${{ steps.ver.outputs.n }}
+          --dart-define=BUILD_NUMBER=${{ steps.ver.outputs.n }}
       - run: |
           mkdir Payload
           cp -R build/ios/iphoneos/Runner.app Payload/
           zip -qry ps4-sender.ipa Payload
+      - name: Attach IPA to the release
+        if: steps.ver.outputs.tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ steps.ver.outputs.tag }}" ps4-sender.ipa --clobber --repo "$GITHUB_REPOSITORY"
       - uses: actions/upload-artifact@v4
         with:
           name: ps4-sender-ipa

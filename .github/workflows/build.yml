@@ -1,5 +1,7 @@
 name: Build APK
 on: [push, workflow_dispatch]
+permissions:
+  contents: write
 concurrency:
   group: build
   cancel-in-progress: true
@@ -12,10 +14,34 @@ jobs:
         with:
           channel: stable
           cache: true
+      - name: Restore signing key
+        env:
+          KS: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KS" ]; then
+            mkdir -p ~/.android
+            echo "$KS" | base64 -d > ~/.android/debug.keystore
+            echo "Signing with the fixed keystore"
+          else
+            echo "::warning::ANDROID_KEYSTORE_BASE64 is not set: the APK gets a random key and cannot update the installed app"
+          fi
       - run: flutter create . --platforms=android
       - run: bash tool/patch_android.sh
       - run: flutter pub get
-      - run: flutter build apk --release --target-platform android-arm64
+      - run: >
+          flutter build apk --release --target-platform android-arm64
+          --build-name=1.0.${{ github.run_number }}
+          --build-number=${{ github.run_number }}
+          --dart-define=BUILD_NUMBER=${{ github.run_number }}
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp build/app/outputs/flutter-apk/app-release.apk ps4-sender.apk
+          gh release create "v1.0.${{ github.run_number }}" ps4-sender.apk \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "v1.0.${{ github.run_number }}" \
+            --notes "Build ${{ github.run_number }}"
       - uses: actions/upload-artifact@v4
         with:
           name: ps4-sender-apk

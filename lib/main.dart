@@ -5,7 +5,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
+import 'settings_page.dart';
+
 import 'services/keep_alive.dart';
+import 'services/updater.dart';
 import 'services/pkg_info.dart';
 import 'services/progress.dart';
 import 'services/ps4_sender.dart';
@@ -95,6 +98,7 @@ class _HomePageState extends State<HomePage> {
   int _served = 0;
   SpeedMeter _meter = SpeedMeter();
   SendController? _ctl;
+  UpdateInfo? _update;
 
   String t(String en, String ar) => _ar ? ar : en;
 
@@ -105,6 +109,20 @@ class _HomePageState extends State<HomePage> {
       if (mounted) setState(() => _phoneIp = ip);
     });
     _clearPickerCache();
+    _checkUpdate();
+  }
+
+  Future<void> _checkUpdate() async {
+    try {
+      final u = await Updater.check();
+      if (mounted) setState(() => _update = u);
+    } catch (_) {}
+  }
+
+  Future<void> _openSettings() async {
+    await Navigator.of(context).push(MaterialPageRoute<void>(
+      builder: (_) => SettingsPage(ar: _ar, update: _update),
+    ));
   }
 
   @override
@@ -296,6 +314,14 @@ class _HomePageState extends State<HomePage> {
         appBar: AppBar(
           title: const Text('PS4 Sender'),
           actions: [
+            IconButton(
+              tooltip: t('Settings', 'الإعدادات'),
+              icon: Badge(
+                isLabelVisible: _update != null,
+                child: const Icon(Icons.settings),
+              ),
+              onPressed: _openSettings,
+            ),
             TextButton(
               onPressed: () => setState(() => _ar = !_ar),
               child: Text(_ar ? 'EN' : 'ع'),
@@ -306,6 +332,19 @@ class _HomePageState extends State<HomePage> {
           child: ListView(
             padding: const EdgeInsets.all(16),
             children: [
+              if (_update != null && !_sending)
+                Card(
+                  color: cs.primaryContainer,
+                  child: ListTile(
+                    leading: const Icon(Icons.system_update),
+                    title: Text(
+                        '${t('New version available', 'يوجد إصدار جديد')}: ${_update!.tag}'),
+                    trailing: FilledButton(
+                      onPressed: _openSettings,
+                      child: Text(t('Update', 'تحديث')),
+                    ),
+                  ),
+                ),
               Text(
                 '${t('Phone IP', 'IP الجوال')}: ${_phoneIp ?? t('not found', 'غير موجود')}',
                 style: Theme.of(context).textTheme.bodySmall,
