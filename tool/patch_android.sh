@@ -25,7 +25,7 @@ cat > android/app/src/main/res/xml/ps4sender_file_paths.xml <<'XML'
 XML
 
 python3 - android/app/src/main/AndroidManifest.xml <<'PY'
-import re, sys
+import os, re, sys
 p = sys.argv[1]
 s = open(p).read()
 names = ["INTERNET", "WAKE_LOCK", "FOREGROUND_SERVICE",
@@ -44,8 +44,11 @@ share = ('<intent-filter><action android:name="android.intent.action.SEND"/>'
          '<action android:name="android.intent.action.SEND_MULTIPLE"/>'
          '<category android:name="android.intent.category.DEFAULT"/>'
          '<data android:mimeType="application/octet-stream"/></intent-filter>')
-s = s.replace("</activity>", share + "</activity>", 1)
-s = s.replace('android:label="ps4_sender"', 'android:label="PS4 Sender"')
+admin = os.environ.get("APP_KIND") == "admin"
+if not admin:  # the admin app must not appear in the Share menu
+    s = s.replace("</activity>", share + "</activity>", 1)
+label = "PS4 Store Admin" if admin else "PS4 Sender"
+s = s.replace('android:label="ps4_sender"', 'android:label="%s"' % label)
 s = s.replace("<application", '<application android:usesCleartextTraffic="true"', 1)
 prov = ('<provider android:name=".UpdateFileProvider" '
         'android:authorities="${applicationId}.fileprovider" '

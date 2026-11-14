@@ -69,3 +69,13 @@ GitHub secret `ANDROID_KEYSTORE_BASE64` (alias `androiddebugkey`, password `andr
 - iPhone one-tap updates: the iOS workflow publishes the IPA and an AltStore/SideStore source to the
   pre-release `ios-latest`. Add `https://github.com/<owner>/<repo>/releases/download/ios-latest/altstore.json`
   once in SideStore/AltStore (the app shows the link in Settings).
+
+## Store + admin app
+
+- The **Store** tab reads `store/catalog.json` from the repository (public). "Add to queue" sends the item's link to the Send tab.
+- The **admin app** (`lib/admin/admin_main.dart`, built by `build-admin.yml` as `ps4-admin.apk` in the pre-release
+  `admin-latest`) logs in with a GitHub token (`repo` permission) and publishes items:
+  it reads the title/icon/size from the PKG, uploads the file to the `store-files` release (or just stores an external link),
+  uploads the icon to `store/icons/` and updates `store/catalog.json`.
+- Commits that only touch `store/**` do not trigger builds.
+- Only publish files you have the right to distribute (homebrew, your own work); GitHub removes repositories after DMCA complaints.

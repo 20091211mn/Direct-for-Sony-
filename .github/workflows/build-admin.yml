@@ -1,0 +1,56 @@
+name: Build Admin APK
+# The store admin app: a separate app (own id) built from lib/admin/admin_main.dart.
+on:
+  push:
+    paths-ignore:
+      - 'store/**'
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: build-admin
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - name: Restore signing key (same key as the main app)
+        env:
+          KS: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KS" ]; then
+            mkdir -p ~/.android
+            echo "$KS" | base64 -d > ~/.android/debug.keystore
+          else
+            echo "::warning::ANDROID_KEYSTORE_BASE64 is not set: updates will not install over the old app"
+          fi
+      - run: flutter create . --platforms=android
+      - run: APP_KIND=admin bash tool/patch_android.sh
+      - name: Give the admin app its own application id
+        run: |
+          sed -i -E 's/(applicationId[[:space:]]*=?[[:space:]]*")com\.example\.ps4_sender(")/\1com.example.ps4_admin\2/' android/app/build.gradle* || true
+          grep -n "com.example.ps4_admin" android/app/build.gradle* || { echo "applicationId was not changed"; exit 1; }
+      - run: flutter pub get
+      - run: >
+          flutter build apk --release --target-platform android-arm64
+          -t lib/admin/admin_main.dart
+          --build-number=${{ github.run_number }}
+          --dart-define=BUILD_NUMBER=${{ github.run_number }}
+      - name: Publish (pre-release admin-latest)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp build/app/outputs/flutter-apk/app-release.apk ps4-admin.apk
+          gh release view admin-latest --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create admin-latest --repo "$GITHUB_REPOSITORY" --prerelease \
+              --title "Store admin app" --notes "Latest admin APK"
+          gh release upload admin-latest ps4-admin.apk --clobber --repo "$GITHUB_REPOSITORY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ps4-admin-apk
+          path: ps4-admin.apk

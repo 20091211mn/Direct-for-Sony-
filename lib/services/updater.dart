@@ -57,7 +57,7 @@ class Updater {
       for (final a in (j['assets'] as List? ?? const [])) {
         final name = ((a as Map)['name'] ?? '') as String;
         final url = (a['browser_download_url'] ?? '') as String;
-        if (name.endsWith('.apk')) apk = url;
+        if (name == 'ps4-sender.apk') apk = url;
         if (name.endsWith('.ipa')) ipa = url;
       }
       return UpdateInfo(

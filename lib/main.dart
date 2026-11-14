@@ -9,6 +9,7 @@ import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
+import 'services/app_state.dart';
 import 'services/discovery.dart';
 import 'services/keep_alive.dart';
 import 'services/native_files.dart';
@@ -19,6 +20,7 @@ import 'services/ps4_sender.dart';
 import 'services/share_intake.dart';
 import 'services/updater.dart';
 import 'settings_page.dart';
+import 'store_page.dart';
 
 void main() => runApp(const App());
 
@@ -38,7 +40,47 @@ class App extends StatelessWidget {
           brightness: Brightness.dark,
         ),
       ),
-      home: const HomePage(),
+      home: const RootPage(),
+    );
+  }
+}
+
+/// Bottom navigation: Send | Store.
+class RootPage extends StatelessWidget {
+  const RootPage({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return ValueListenableBuilder<bool>(
+      valueListenable: appArabic,
+      builder: (context, ar, _) => ValueListenableBuilder<int>(
+        valueListenable: Bridge.tab,
+        builder: (context, tab, _) => Directionality(
+          textDirection: ar ? TextDirection.rtl : TextDirection.ltr,
+          child: Scaffold(
+            body: IndexedStack(
+              index: tab,
+              children: const [HomePage(), StorePage()],
+            ),
+            bottomNavigationBar: NavigationBar(
+              selectedIndex: tab,
+              onDestinationSelected: (i) => Bridge.tab.value = i,
+              destinations: [
+                NavigationDestination(
+                  icon: const Icon(Icons.send_outlined),
+                  selectedIcon: const Icon(Icons.send),
+                  label: ar ? 'إرسال' : 'Send',
+                ),
+                NavigationDestination(
+                  icon: const Icon(Icons.storefront_outlined),
+                  selectedIcon: const Icon(Icons.storefront),
+                  label: ar ? 'المتجر' : 'Store',
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
     );
   }
 }
@@ -123,6 +165,7 @@ class _HomePageState extends State<HomePage> {
     Ps4Sender.localIp().then((ip) {
       if (mounted) setState(() => _phoneIp = ip);
     });
+    Bridge.addUrl.addListener(_onBridge);
     _loadPrefs().then((_) => _initShare());
     NetCheck.hasCellular().then((v) {
       if (mounted) setState(() => _hasCellular = v);
@@ -133,9 +176,27 @@ class _HomePageState extends State<HomePage> {
 
   @override
   void dispose() {
+    Bridge.addUrl.removeListener(_onBridge);
     _ps4.dispose();
     _url.dispose();
     super.dispose();
+  }
+
+  /// The Store tab asked to add a link to the queue.
+  void _onBridge() {
+    final u = Bridge.addUrl.value;
+    if (u == null) return;
+    Bridge.addUrl.value = null;
+    if (_sending) {
+      _snack(t('Busy sending, try again after it ends.',
+          'جارٍ الإرسال، أعد المحاولة بعد انتهائه.'));
+      return;
+    }
+    setState(() {
+      _source = Source.link;
+      _url.text = u;
+    });
+    _addLink();
   }
 
   // ---------------------------------------------------------------- storage
@@ -152,6 +213,7 @@ class _HomePageState extends State<HomePage> {
         _proxy = p.getBool('proxy') ?? true;
         _fast = p.getBool('fast') ?? true;
         _source = p.getString('source') == 'file' ? Source.file : Source.link;
+        appArabic.value = _ar;
         final raw = p.getString('history');
         if (raw != null) {
           _history = (jsonDecode(raw) as List)
@@ -859,6 +921,7 @@ class _HomePageState extends State<HomePage> {
             TextButton(
               onPressed: () {
                 setState(() => _ar = !_ar);
+                appArabic.value = _ar;
                 _save();
               },
               child: Text(_ar ? 'EN' : 'ع'),
@@ -866,6 +929,7 @@ class _HomePageState extends State<HomePage> {
           ],
         ),
         body: SafeArea(
+          bottom: false,
           child: ListView(
             padding: const EdgeInsets.all(16),
             children: [
