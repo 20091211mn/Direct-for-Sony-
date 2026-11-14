@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "updated": "2026-11-14T10:33:49.735765Z",
+  "items": [
+    {
+      "id": "warzone-native",
+      "title": "Warzone Native",
+      "category": "",
+      "description": "",
+      "version": "",
+      "size": 6619136,
+      "icon": "https://raw.githubusercontent.com/20091211mn/Direct-for-Sony-/main/store/icons/warzone-native.png",
+      "url": "https://github.com/20091211mn/Direct-for-Sony-/releases/download/store-files/warzone-native.pkg",
+      "added": "2026-11-14"
+    }
+  ]
+}
