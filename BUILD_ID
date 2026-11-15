@@ -1,2 +1,2 @@
-ps4_sender build: 2026-11-15T05:40Z
-features: update-loop fix, notices+bell, admin notices, store highlights, install-now, auto-retry, split code
+ps4_sender build: 2026-11-15T12:18Z
+features: admin auto-update, update-loop fix, notices+bell, store highlights, install-now, auto-retry, split code

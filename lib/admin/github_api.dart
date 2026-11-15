@@ -235,6 +235,25 @@ class GithubApi {
     _check(r, [200]);
   }
 
+  /// The newest build of the admin app itself (published by the "Build Admin APK"
+  /// workflow in the pre-release "admin-latest"; its notes say "Build N").
+  Future<({int build, String? apkUrl})?> adminRelease() async {
+    final r = await _send('GET',
+        'https://api.github.com/repos/$repo/releases/tags/admin-latest');
+    if (r.status == 404) return null;
+    _check(r, [200]);
+    final m = jsonDecode(r.body) as Map;
+    final n = RegExp(r'Build (\d+)').firstMatch((m['body'] ?? '') as String);
+    final build = int.tryParse(n?.group(1) ?? '') ?? 0;
+    String? apk;
+    for (final a in (m['assets'] as List? ?? const [])) {
+      if ((a as Map)['name'] == 'ps4-admin.apk') {
+        apk = a['browser_download_url'] as String?;
+      }
+    }
+    return (build: build, apkUrl: apk);
+  }
+
   // --------------------------------------------------------- release assets
 
   Future<int> ensureRelease() async {

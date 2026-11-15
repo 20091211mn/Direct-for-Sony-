@@ -50,6 +50,8 @@ jobs:
             gh release create admin-latest --repo "$GITHUB_REPOSITORY" --prerelease \
               --title "Store admin app" --notes "Latest admin APK"
           gh release upload admin-latest ps4-admin.apk --clobber --repo "$GITHUB_REPOSITORY"
+          # the admin app reads this number to know when an update exists
+          gh release edit admin-latest --repo "$GITHUB_REPOSITORY" --notes "Build ${{ github.run_number }}"
       - uses: actions/upload-artifact@v4
         with:
           name: ps4-admin-apk

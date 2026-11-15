@@ -92,3 +92,8 @@ GitHub secret `ANDROID_KEYSTORE_BASE64` (alias `androiddebugkey`, password `andr
   and the phone waits up to 10 minutes for the PS4 to continue; a changed phone address is reported.
 - Code layout: `lib/main.dart` (app + tabs), `lib/home_page.dart` (Send tab), `lib/store_page.dart`,
   `lib/notifications_page.dart`, `lib/widgets/`, `lib/util/`, `lib/services/`, `lib/admin/` (admin app).
+
+## Admin app updates
+
+The admin app checks the pre-release `admin-latest` (its notes contain `Build N`, written by `build-admin.yml`),
+shows an update banner, downloads the APK, checks version/signature and opens the installer.

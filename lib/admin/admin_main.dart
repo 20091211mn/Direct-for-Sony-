@@ -3,7 +3,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../services/announcements.dart';
 import '../services/store_catalog.dart';
-import '../services/updater.dart' show kRepo;
+import '../services/updater.dart';
 import 'announcement_editor.dart';
 import 'github_api.dart';
 import 'item_editor.dart';
@@ -203,11 +203,131 @@ class _AdminHomeState extends State<AdminHome> {
   bool _noticesLoading = true;
   String? _noticesError;
 
+  // updates of this admin app
+  UpdateInfo? _upd;
+  bool _updating = false;
+  double _updProgress = 0;
+  String? _updMsg;
+
   @override
   void initState() {
     super.initState();
     _load();
     _loadNotices();
+    _reconcile();
+    _checkAdminUpdate();
+  }
+
+  /// Did the last update of this app work?
+  Future<void> _reconcile() async {
+    final o = await Updater.reconcile();
+    if (o == null || !mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(o.success ? 'تم تحديث تطبيق الإدارة' : 'لم يتم تثبيت التحديث'),
+        content: Text(o.success
+            ? 'أنت الآن على ${o.tag}.'
+            : 'إذا ظهر تعارض في المثبّت فاحذف تطبيق الإدارة مرة واحدة ثم ثبّت النسخة الجديدة؛ بعدها تعمل التحديثات تلقائياً.'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('حسناً')),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _checkAdminUpdate() async {
+    try {
+      final r = await widget.api.adminRelease();
+      if (r == null || r.apkUrl == null || r.build <= kBuildNumber) return;
+      final p = await SharedPreferences.getInstance();
+      if (r.build <= (p.getInt('snoozed_build') ?? 0)) return;
+      if (mounted) {
+        setState(() => _upd = UpdateInfo(
+              tag: 'build ${r.build}',
+              build: r.build,
+              notes: '',
+              pageUrl: '',
+              apkUrl: r.apkUrl,
+            ));
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _updateApp() async {
+    final u = _upd;
+    final url = u?.apkUrl;
+    if (u == null || url == null) return;
+    setState(() {
+      _updating = true;
+      _updProgress = 0;
+      _updMsg = null;
+    });
+    try {
+      final path = await Updater.download(url, (p) {
+        if (mounted) setState(() => _updProgress = p);
+      });
+      final chk = await Updater.inspect(path);
+      if (chk.sameSignature == false) {
+        await Updater.snooze(u.build);
+        if (mounted) {
+          setState(() => _updMsg =
+              'لا يمكن التحديث فوق النسخة الحالية لأنها موقّعة بمفتاح مختلف. احذف تطبيق الإدارة مرة واحدة ثم ثبّت النسخة الجديدة.');
+        }
+        return;
+      }
+      final a = chk.archiveVersion;
+      final i = chk.installedVersion;
+      if (a != null && i != null && a <= i) {
+        await Updater.snooze(u.build);
+        if (mounted) setState(() => _upd = null);
+        return;
+      }
+      await Updater.markPending(u);
+      final r = await Updater.install(path);
+      if (mounted && r == 'needs_permission') {
+        setState(() => _updMsg =
+            'اسمح بـ "تثبيت التطبيقات غير المعروفة" لهذا التطبيق ثم اضغط تحديث مرة أخرى.');
+      }
+    } catch (e) {
+      if (mounted) setState(() => _updMsg = 'فشل التحديث: $e');
+    } finally {
+      if (mounted) setState(() => _updating = false);
+    }
+  }
+
+  Widget _updateBanner(ColorScheme cs) {
+    final u = _upd!;
+    return Card(
+      margin: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+      color: cs.primaryContainer,
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(children: [
+              const Icon(Icons.system_update),
+              const SizedBox(width: 8),
+              Expanded(child: Text('يوجد تحديث لتطبيق الإدارة (${u.tag})')),
+              if (!_updating)
+                FilledButton(onPressed: _updateApp, child: const Text('تحديث')),
+            ]),
+            if (_updating) ...[
+              const SizedBox(height: 8),
+              LinearProgressIndicator(value: _updProgress),
+              const SizedBox(height: 4),
+              Text('${(_updProgress * 100).toStringAsFixed(0)}%'),
+            ],
+            if (_updMsg != null) ...[
+              const SizedBox(height: 8),
+              Text(_updMsg!),
+            ],
+          ],
+        ),
+      ),
+    );
   }
 
   Future<void> _load() async {
@@ -432,7 +552,12 @@ class _AdminHomeState extends State<AdminHome> {
         ],
       ),
       body: SafeArea(
-        child: storeTab ? _storeTab(cs) : _noticesTab(cs),
+        child: Column(
+          children: [
+            if (_upd != null) _updateBanner(cs),
+            Expanded(child: storeTab ? _storeTab(cs) : _noticesTab(cs)),
+          ],
+        ),
       ),
     );
   }
