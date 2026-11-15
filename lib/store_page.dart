@@ -5,9 +5,10 @@ import 'package:flutter/material.dart';
 
 import 'services/app_state.dart';
 import 'services/store_catalog.dart';
+import 'widgets/notification_bell.dart';
 
-/// The "Store" tab: a catalog published by the admin app. Tapping "Add to queue"
-/// sends the link to the Send tab.
+/// The "Store" tab: a catalog published by the admin app. "Add to queue" sends
+/// the link to the Send tab; "Install now" also starts sending when the queue is empty.
 class StorePage extends StatefulWidget {
   const StorePage({super.key});
 
@@ -63,7 +64,13 @@ class _StorePageState extends State<StorePage> {
     return '${v.toStringAsFixed(i == 0 ? 0 : 1)} ${u[i]}';
   }
 
+  bool _isNew(StoreItem i) {
+    final d = DateTime.tryParse(i.added);
+    return d != null && DateTime.now().difference(d).inDays <= 14;
+  }
+
   void _add(StoreItem item) {
+    Bridge.autoSend = false;
     Bridge.addUrl.value = item.url;
     Bridge.tab.value = 0;
     ScaffoldMessenger.of(context)
@@ -74,26 +81,162 @@ class _StorePageState extends State<StorePage> {
       ));
   }
 
-  Widget _icon(StoreItem item) {
-    const size = 56.0;
+  /// Adds the item and, when the queue was empty and the PS4 address is saved, sends it.
+  void _installNow(StoreItem item) {
+    Bridge.autoSend = true;
+    Bridge.addUrl.value = item.url;
+    Bridge.tab.value = 0;
+  }
+
+  Widget _icon(StoreItem item, {double size = 56}) {
     final fallback = Container(
       width: size,
       height: size,
       decoration: BoxDecoration(
         color: Theme.of(context).colorScheme.surfaceContainerHighest,
-        borderRadius: BorderRadius.circular(12),
+        borderRadius: BorderRadius.circular(14),
       ),
       child: const Icon(Icons.inventory_2),
     );
     if (item.icon.isEmpty) return fallback;
     return ClipRRect(
-      borderRadius: BorderRadius.circular(12),
+      borderRadius: BorderRadius.circular(14),
       child: Image.network(
         item.icon,
         width: size,
         height: size,
         fit: BoxFit.cover,
         errorBuilder: (_, __, ___) => fallback,
+      ),
+    );
+  }
+
+  Widget _newBadge(ColorScheme cs) => Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+        decoration: BoxDecoration(
+          color: cs.primary,
+          borderRadius: BorderRadius.circular(10),
+        ),
+        child: Text(t('New', 'جديد'),
+            style: TextStyle(color: cs.onPrimary, fontSize: 12)),
+      );
+
+  Widget _featuredStrip(List<StoreItem> items, ColorScheme cs) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.only(bottom: 8),
+          child: Row(children: [
+            Icon(Icons.star, size: 18, color: cs.primary),
+            const SizedBox(width: 6),
+            Text(t('Featured', 'مميز'),
+                style: Theme.of(context).textTheme.titleSmall),
+          ]),
+        ),
+        SizedBox(
+          height: 132,
+          child: ListView(
+            scrollDirection: Axis.horizontal,
+            children: [
+              for (final i in items)
+                Padding(
+                  padding: const EdgeInsetsDirectional.only(end: 10),
+                  child: InkWell(
+                    borderRadius: BorderRadius.circular(16),
+                    onTap: () => _add(i),
+                    child: Container(
+                      width: 120,
+                      padding: const EdgeInsets.all(10),
+                      decoration: BoxDecoration(
+                        color: cs.primaryContainer,
+                        borderRadius: BorderRadius.circular(16),
+                      ),
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          _icon(i, size: 60),
+                          const SizedBox(height: 8),
+                          Text(i.title,
+                              maxLines: 2,
+                              textAlign: TextAlign.center,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                  color: cs.onPrimaryContainer, fontSize: 13)),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 16),
+      ],
+    );
+  }
+
+  Widget _card(StoreItem item, ColorScheme cs) {
+    final meta = [
+      if (item.category.isNotEmpty) item.category,
+      if (item.version.isNotEmpty) 'v${item.version}',
+      if (_fmtSize(item.size).isNotEmpty) _fmtSize(item.size),
+    ].join(' · ');
+    return Card(
+      color: cs.surfaceContainerHigh,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _icon(item),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(children: [
+                        Expanded(
+                          child: Text(item.title,
+                              style: Theme.of(context).textTheme.titleMedium),
+                        ),
+                        if (_isNew(item)) _newBadge(cs),
+                      ]),
+                      const SizedBox(height: 2),
+                      Text(meta, style: Theme.of(context).textTheme.bodySmall),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            if (item.description.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              Text(item.description, maxLines: 4, overflow: TextOverflow.ellipsis),
+            ],
+            const SizedBox(height: 10),
+            Wrap(
+              alignment: WrapAlignment.end,
+              spacing: 8,
+              runSpacing: 6,
+              children: [
+                OutlinedButton.icon(
+                  onPressed: () => _add(item),
+                  icon: const Icon(Icons.playlist_add),
+                  label: Text(t('Add to queue', 'إضافة للقائمة')),
+                ),
+                FilledButton.icon(
+                  onPressed: () => _installNow(item),
+                  icon: const Icon(Icons.bolt),
+                  label: Text(t('Install now', 'تثبيت الآن')),
+                ),
+              ],
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -116,7 +259,11 @@ class _StorePageState extends State<StorePage> {
           if (q.isEmpty) return true;
           return i.title.toLowerCase().contains(q) ||
               i.description.toLowerCase().contains(q);
-        }).toList();
+        }).toList()
+          ..sort((a, b) => b.added.compareTo(a.added)); // newest first
+        final featured = (q.isEmpty && _category.isEmpty)
+            ? all.where((i) => i.featured).toList()
+            : <StoreItem>[];
 
         return Directionality(
           textDirection: ar ? TextDirection.rtl : TextDirection.ltr,
@@ -124,6 +271,7 @@ class _StorePageState extends State<StorePage> {
             appBar: AppBar(
               title: Text(t('Store', 'المتجر')),
               actions: [
+                const NotificationBell(),
                 IconButton(
                   tooltip: t('Refresh', 'تحديث'),
                   icon: const Icon(Icons.refresh),
@@ -144,7 +292,8 @@ class _StorePageState extends State<StorePage> {
                       decoration: InputDecoration(
                         prefixIcon: const Icon(Icons.search),
                         hintText: t('Search the store', 'ابحث في المتجر'),
-                        border: const OutlineInputBorder(),
+                        border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(14)),
                       ),
                     ),
                     if (categories.isNotEmpty) ...[
@@ -159,19 +308,16 @@ class _StorePageState extends State<StorePage> {
                               child: ChoiceChip(
                                 label: Text(t('All', 'الكل')),
                                 selected: _category.isEmpty,
-                                onSelected: (_) =>
-                                    setState(() => _category = ''),
+                                onSelected: (_) => setState(() => _category = ''),
                               ),
                             ),
                             for (final c in categories)
                               Padding(
-                                padding:
-                                    const EdgeInsetsDirectional.only(end: 8),
+                                padding: const EdgeInsetsDirectional.only(end: 8),
                                 child: ChoiceChip(
                                   label: Text(c),
                                   selected: _category == c,
-                                  onSelected: (_) =>
-                                      setState(() => _category = c),
+                                  onSelected: (_) => setState(() => _category = c),
                                 ),
                               ),
                           ],
@@ -179,6 +325,7 @@ class _StorePageState extends State<StorePage> {
                       ),
                     ],
                     const SizedBox(height: 12),
+                    if (featured.isNotEmpty) _featuredStrip(featured, cs),
                     if (_loading && _catalog == null)
                       const Padding(
                         padding: EdgeInsets.all(32),
@@ -205,74 +352,18 @@ class _StorePageState extends State<StorePage> {
                     else if (shown.isEmpty)
                       Padding(
                         padding: const EdgeInsets.all(32),
-                        child: Text(
-                          t('No results.', 'لا توجد نتائج.'),
-                          textAlign: TextAlign.center,
-                        ),
+                        child: Text(t('No results.', 'لا توجد نتائج.'),
+                            textAlign: TextAlign.center),
                       )
-                    else
-                      for (final item in shown)
-                        Card(
-                          color: cs.surfaceContainerHigh,
-                          child: Padding(
-                            padding: const EdgeInsets.all(12),
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Row(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    _icon(item),
-                                    const SizedBox(width: 12),
-                                    Expanded(
-                                      child: Column(
-                                        crossAxisAlignment:
-                                            CrossAxisAlignment.start,
-                                        children: [
-                                          Text(item.title,
-                                              style: Theme.of(context)
-                                                  .textTheme
-                                                  .titleMedium),
-                                          const SizedBox(height: 2),
-                                          Text(
-                                            [
-                                              if (item.category.isNotEmpty)
-                                                item.category,
-                                              if (item.version.isNotEmpty)
-                                                'v${item.version}',
-                                              if (_fmtSize(item.size)
-                                                  .isNotEmpty)
-                                                _fmtSize(item.size),
-                                            ].join(' · '),
-                                            style: Theme.of(context)
-                                                .textTheme
-                                                .bodySmall,
-                                          ),
-                                        ],
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                                if (item.description.isNotEmpty) ...[
-                                  const SizedBox(height: 8),
-                                  Text(item.description,
-                                      maxLines: 4,
-                                      overflow: TextOverflow.ellipsis),
-                                ],
-                                const SizedBox(height: 8),
-                                Align(
-                                  alignment: AlignmentDirectional.centerEnd,
-                                  child: FilledButton.tonalIcon(
-                                    onPressed: () => _add(item),
-                                    icon: const Icon(Icons.playlist_add),
-                                    label: Text(
-                                        t('Add to queue', 'إضافة للقائمة')),
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
+                    else ...[
+                      if (featured.isNotEmpty)
+                        Padding(
+                          padding: const EdgeInsets.only(bottom: 8),
+                          child: Text(t('Latest', 'الأحدث'),
+                              style: Theme.of(context).textTheme.titleSmall),
                         ),
+                      for (final item in shown) _card(item, cs),
+                    ],
                   ],
                 ),
               ),

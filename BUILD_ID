@@ -1,2 +1,2 @@
-ps4_sender build: 2026-11-14T09:51Z
-features: store tab, admin app, history, diagnostics, icon, sidestore source
+ps4_sender build: 2026-11-15T05:40Z
+features: update-loop fix, notices+bell, admin notices, store highlights, install-now, auto-retry, split code

@@ -61,6 +61,7 @@ class _ItemEditorState extends State<ItemEditor> {
   final _url = TextEditingController();
 
   _Src _src = _Src.link;
+  bool _featured = false;
   PkgInfo? _info;
   PickedFile? _file;
   bool _reading = false;
@@ -79,6 +80,7 @@ class _ItemEditorState extends State<ItemEditor> {
       _version.text = i.version;
       _desc.text = i.description;
       _url.text = i.url;
+      _featured = i.featured;
     }
   }
 
@@ -232,6 +234,7 @@ class _ItemEditorState extends State<ItemEditor> {
         size: size,
         icon: icon,
         added: existing?.added.isNotEmpty == true ? existing!.added : today,
+        featured: _featured,
       ));
       if (!mounted) return;
       Navigator.pop(context, true);
@@ -367,6 +370,13 @@ class _ItemEditorState extends State<ItemEditor> {
               maxLines: 6,
               decoration: const InputDecoration(
                   labelText: 'الوصف', border: OutlineInputBorder()),
+            ),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('عنصر مميز'),
+              subtitle: const Text('يظهر في شريط "مميز" أعلى المتجر'),
+              value: _featured,
+              onChanged: _busy ? null : (v) => setState(() => _featured = v),
             ),
             const SizedBox(height: 16),
             if (_error != null)

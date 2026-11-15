@@ -1,8 +1,20 @@
 import 'dart:convert';
 import 'dart:io';
 
+import '../services/announcements.dart';
 import '../services/native_files.dart';
 import '../services/store_catalog.dart';
+
+/// A published release of the app (used to attach "what's new" notes).
+class ReleaseInfo {
+  ReleaseInfo(
+      {required this.id, required this.tag, required this.build, required this.body});
+
+  final int id;
+  final String tag;
+  final int build;
+  final String body;
+}
 
 class GithubError implements Exception {
   GithubError(this.status, this.message);
@@ -154,6 +166,73 @@ class GithubApi {
         await deleteAsset(id, name);
       } catch (_) {}
     }
+  }
+
+  // ------------------------------------------------------------ announcements
+
+  static const announcementsPath = 'store/announcements.json';
+
+  Future<List<Announcement>> loadAnnouncements() async {
+    final f = await getFile(announcementsPath);
+    if (f.text == null) return [];
+    return Announcement.parseList(f.text!);
+  }
+
+  Future<void> _updateAnnouncements(
+      List<Announcement> Function(List<Announcement> items) change,
+      String message) async {
+    for (var attempt = 0; attempt < 3; attempt++) {
+      final f = await getFile(announcementsPath);
+      final items =
+          f.text == null ? <Announcement>[] : Announcement.parseList(f.text!);
+      final out = Announcement.encodeList(change(items));
+      try {
+        await putFile(announcementsPath, utf8.encode(out), message, sha: f.sha);
+        return;
+      } on GithubError catch (e) {
+        if ((e.status == 409 || e.status == 422) && attempt < 2) continue;
+        rethrow;
+      }
+    }
+  }
+
+  Future<void> addAnnouncement(Announcement a) =>
+      _updateAnnouncements((l) => [a, ...l], 'notice: ${a.title}');
+
+  Future<void> removeAnnouncement(String id) => _updateAnnouncements(
+      (l) => l.where((e) => e.id != id).toList(), 'notice: remove $id');
+
+  // ---------------------------------------------------------------- releases
+
+  /// Published (non-pre-release) app releases that have the APK, newest first.
+  Future<List<ReleaseInfo>> listReleases() async {
+    final r = await _send(
+        'GET', 'https://api.github.com/repos/$repo/releases?per_page=15');
+    _check(r, [200]);
+    final out = <ReleaseInfo>[];
+    for (final x in jsonDecode(r.body) as List) {
+      final m = x as Map;
+      if (m['draft'] == true || m['prerelease'] == true) continue;
+      final hasApk = (m['assets'] as List? ?? const [])
+          .any((a) => (a as Map)['name'] == 'ps4-sender.apk');
+      if (!hasApk) continue;
+      final tag = (m['tag_name'] ?? '') as String;
+      out.add(ReleaseInfo(
+        id: m['id'] as int,
+        tag: tag,
+        build: int.tryParse(tag.split('.').last) ?? 0,
+        body: (m['body'] ?? '') as String,
+      ));
+    }
+    out.sort((a, b) => b.build.compareTo(a.build));
+    return out;
+  }
+
+  Future<void> setReleaseNotes(int releaseId, String body) async {
+    final r = await _send(
+        'PATCH', 'https://api.github.com/repos/$repo/releases/$releaseId',
+        json: {'body': body});
+    _check(r, [200]);
   }
 
   // --------------------------------------------------------- release assets

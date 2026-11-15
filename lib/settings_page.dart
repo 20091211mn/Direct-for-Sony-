@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import 'services/app_state.dart';
 import 'services/updater.dart';
 
 class SettingsPage extends StatefulWidget {
@@ -21,6 +22,7 @@ class _SettingsPageState extends State<SettingsPage> {
   bool _downloading = false;
   double _progress = 0;
   String? _message;
+  bool _reinstallHint = false;
 
   String t(String en, String ar) => widget.ar ? ar : en;
 
@@ -34,10 +36,12 @@ class _SettingsPageState extends State<SettingsPage> {
     setState(() {
       _checking = true;
       _message = null;
+      _reinstallHint = false;
     });
     try {
       final u = await Updater.check();
       if (!mounted) return;
+      appUpdate.value = u;
       setState(() {
         _update = u;
         _message =
@@ -57,20 +61,52 @@ class _SettingsPageState extends State<SettingsPage> {
   }
 
   Future<void> _doUpdate() async {
-    final url = _update?.apkUrl;
-    if (url == null) {
-      setState(() => _message = t('This release has no APK.', 'هذا الإصدار لا يحتوي ملف APK.'));
+    final u = _update;
+    final url = u?.apkUrl;
+    if (u == null || url == null) {
+      setState(() => _message =
+          t('This release has no APK.', 'هذا الإصدار لا يحتوي ملف APK.'));
       return;
     }
     setState(() {
       _downloading = true;
       _progress = 0;
       _message = null;
+      _reinstallHint = false;
     });
     try {
       final path = await Updater.download(url, (p) {
         if (mounted) setState(() => _progress = p);
       });
+
+      // Explain a doomed update instead of looping on it.
+      final chk = await Updater.inspect(path);
+      if (chk.sameSignature == false) {
+        await Updater.snooze(u.build);
+        if (!mounted) return;
+        setState(() {
+          _reinstallHint = true;
+          _message = t(
+              'This update cannot be installed over the current app because it was signed with a different key (an older install). Uninstall the app once, then install the new version. After that, updates install normally.',
+              'لا يمكن تثبيت هذا التحديث فوق النسخة الحالية لأنها موقّعة بمفتاح مختلف (تثبيت قديم). احذف التطبيق مرة واحدة ثم ثبّت النسخة الجديدة. بعدها تعمل التحديثات بشكل عادي.');
+        });
+        return;
+      }
+      final a = chk.archiveVersion;
+      final i = chk.installedVersion;
+      if (a != null && i != null && a <= i) {
+        await Updater.snooze(u.build);
+        appUpdate.value = null;
+        if (!mounted) return;
+        setState(() {
+          _update = null;
+          _message = t('The downloaded version is not newer than the installed one.',
+              'النسخة المنزّلة ليست أحدث من المثبتة.');
+        });
+        return;
+      }
+
+      await Updater.markPending(u);
       final r = await Updater.install(path);
       if (!mounted) return;
       setState(() {
@@ -86,15 +122,9 @@ class _SettingsPageState extends State<SettingsPage> {
     }
   }
 
-  Future<void> _copySource() async {
-    await Clipboard.setData(const ClipboardData(text: kSourceUrl));
-    if (mounted) setState(() => _message = t('Source link copied.', 'تم نسخ رابط المصدر.'));
-  }
-
-  Future<void> _copyIpa() async {
-    final url = _update?.ipaUrl ?? _update?.pageUrl ?? '';
-    await Clipboard.setData(ClipboardData(text: url));
-    if (mounted) setState(() => _message = t('Link copied.', 'تم نسخ الرابط.'));
+  Future<void> _copy(String text, String done) async {
+    await Clipboard.setData(ClipboardData(text: text));
+    if (mounted) setState(() => _message = done);
   }
 
   @override
@@ -132,6 +162,8 @@ class _SettingsPageState extends State<SettingsPage> {
                 const SizedBox(height: 16),
                 Card(
                   color: cs.surfaceContainerHigh,
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(16)),
                   child: Padding(
                     padding: const EdgeInsets.all(16),
                     child: Column(
@@ -141,9 +173,15 @@ class _SettingsPageState extends State<SettingsPage> {
                           '${t('New version available', 'يوجد إصدار جديد')}: ${u.tag}',
                           style: Theme.of(context).textTheme.titleMedium,
                         ),
-                        if (u.notes.isNotEmpty) ...[
+                        if (u.features.isNotEmpty) ...[
                           const SizedBox(height: 8),
-                          Text(u.notes),
+                          Text(t("What's new", 'الجديد في هذا الإصدار'),
+                              style: Theme.of(context).textTheme.labelLarge),
+                          for (final f in u.features)
+                            Padding(
+                              padding: const EdgeInsets.only(top: 4),
+                              child: Text('•  $f'),
+                            ),
                         ],
                         const SizedBox(height: 12),
                         if (Platform.isAndroid) ...[
@@ -165,16 +203,19 @@ class _SettingsPageState extends State<SettingsPage> {
                           Text(t(
                               'Open SideStore / AltStore, go to My Apps and press Update.',
                               'افتح SideStore أو AltStore ثم "تطبيقاتي" واضغط تحديث.')),
-                          const SizedBox(height: 8),
-                          FilledButton.icon(
-                            onPressed: _copyIpa,
-                            icon: const Icon(Icons.copy),
-                            label: Text(t('Copy download link', 'نسخ رابط التحميل')),
-                          ),
                         ],
                       ],
                     ),
                   ),
+                ),
+              ],
+              if (_reinstallHint && u?.apkUrl != null) ...[
+                const SizedBox(height: 12),
+                OutlinedButton.icon(
+                  onPressed: () => _copy(u!.apkUrl!,
+                      t('Download link copied.', 'تم نسخ رابط التنزيل.')),
+                  icon: const Icon(Icons.copy),
+                  label: Text(t('Copy the APK download link', 'نسخ رابط تنزيل APK')),
                 ),
               ],
               if (!Platform.isAndroid) ...[
@@ -191,7 +232,8 @@ class _SettingsPageState extends State<SettingsPage> {
                     style: const TextStyle(fontFamily: 'monospace', fontSize: 12)),
                 const SizedBox(height: 8),
                 FilledButton.tonalIcon(
-                  onPressed: _copySource,
+                  onPressed: () => _copy(kSourceUrl,
+                      t('Source link copied.', 'تم نسخ رابط المصدر.')),
                   icon: const Icon(Icons.copy),
                   label: Text(t('Copy source link', 'نسخ رابط المصدر')),
                 ),

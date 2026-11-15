@@ -20,6 +20,7 @@ class StoreItem {
     this.size = 0,
     this.icon = '',
     this.added = '',
+    this.featured = false,
   });
 
   final String id;
@@ -32,6 +33,9 @@ class StoreItem {
   final String icon;
   final String added;
 
+  /// Shown at the top of the store.
+  final bool featured;
+
   factory StoreItem.fromJson(Map<String, dynamic> j) => StoreItem(
         id: (j['id'] ?? '') as String,
         title: (j['title'] ?? '') as String,
@@ -42,6 +46,7 @@ class StoreItem {
         size: ((j['size'] ?? 0) as num).toInt(),
         icon: (j['icon'] ?? '') as String,
         added: (j['added'] ?? '') as String,
+        featured: (j['featured'] ?? false) == true,
       );
 
   Map<String, dynamic> toJson() => {
@@ -54,6 +59,7 @@ class StoreItem {
         'icon': icon,
         'url': url,
         'added': added,
+        'featured': featured,
       };
 }
 

@@ -12,6 +12,7 @@ echo "Android package: $PKG"
 sed "s/^package .*/package $PKG/" native/MainActivity.kt > "$MA"
 sed "s/^package .*/package $PKG/" native/KeepAliveService.kt > "$DIR/KeepAliveService.kt"
 sed "s/^package .*/package $PKG/" native/UpdateFileProvider.kt > "$DIR/UpdateFileProvider.kt"
+sed "s/^package .*/package $PKG/" native/CheckJobService.kt > "$DIR/CheckJobService.kt"
 
 # app icon (adaptive + legacy) and its background colour
 cp -r native/res/. android/app/src/main/res/
@@ -31,7 +32,8 @@ s = open(p).read()
 names = ["INTERNET", "WAKE_LOCK", "FOREGROUND_SERVICE",
          "FOREGROUND_SERVICE_DATA_SYNC", "POST_NOTIFICATIONS",
          "ACCESS_NETWORK_STATE", "ACCESS_WIFI_STATE", "CHANGE_WIFI_STATE",
-         "REQUEST_IGNORE_BATTERY_OPTIMIZATIONS", "REQUEST_INSTALL_PACKAGES"]
+         "REQUEST_IGNORE_BATTERY_OPTIMIZATIONS", "REQUEST_INSTALL_PACKAGES",
+         "RECEIVE_BOOT_COMPLETED"]
 perms = "".join('<uses-permission android:name="android.permission.%s"/>' % n for n in names)
 s = re.sub(r"(<manifest[^>]*>)", lambda m: m.group(1) + perms, s, count=1)
 svc = '<service android:name=".KeepAliveService" android:exported="false" android:foregroundServiceType="dataSync"/>'
@@ -55,7 +57,10 @@ prov = ('<provider android:name=".UpdateFileProvider" '
         'android:exported="false" android:grantUriPermissions="true">'
         '<meta-data android:name="android.support.FILE_PROVIDER_PATHS" '
         'android:resource="@xml/ps4sender_file_paths"/></provider>')
-s = s.replace("</application>", svc + prov + "</application>", 1)
+job = ('<service android:name=".CheckJobService" '
+       'android:permission="android.permission.BIND_JOB_SERVICE" '
+       'android:exported="false"/>')
+s = s.replace("</application>", svc + prov + job + "</application>", 1)
 open(p, "w").write(s)
 PY
 echo "Manifest patched"

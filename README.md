@@ -79,3 +79,16 @@ GitHub secret `ANDROID_KEYSTORE_BASE64` (alias `androiddebugkey`, password `andr
   uploads the icon to `store/icons/` and updates `store/catalog.json`.
 - Commits that only touch `store/**` do not trigger builds.
 - Only publish files you have the right to distribute (homebrew, your own work); GitHub removes repositories after DMCA complaints.
+
+## Updates, notices and structure
+
+- The update check picks the highest published release that has `ps4-sender.apk` (iPhone: the SideStore source),
+  inspects the downloaded APK (version + signature) before installing, remembers a failed attempt and stops
+  showing the banner for that build, and shows "what's new" after a successful update.
+- The admin app publishes news and "new update" notices (with a list of new features, also written into the
+  release notes). The app shows them in the bell menu; on Android a background job (JobScheduler, every ~6 h)
+  also shows a system notification.
+- Sending is more patient: the payload is re-sent if the PS4 is busy, the proxy resumes a dropped download,
+  and the phone waits up to 10 minutes for the PS4 to continue; a changed phone address is reported.
+- Code layout: `lib/main.dart` (app + tabs), `lib/home_page.dart` (Send tab), `lib/store_page.dart`,
+  `lib/notifications_page.dart`, `lib/widgets/`, `lib/util/`, `lib/services/`, `lib/admin/` (admin app).

@@ -4,6 +4,9 @@ import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.job.JobInfo
+import android.app.job.JobScheduler
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -18,6 +21,7 @@ import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 import java.io.File
+import java.security.MessageDigest
 import java.io.FileInputStream
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
@@ -88,6 +92,28 @@ class MainActivity : FlutterActivity() {
         val files = ArrayList<Map<String, Any>>()
         for (u in uris) files.add(describe(u))
         return mapOf("text" to text, "files" to files)
+    }
+
+    @Suppress("DEPRECATION")
+    private fun versionCodeOf(p: android.content.pm.PackageInfo): Long =
+        if (Build.VERSION.SDK_INT >= 28) p.longVersionCode else p.versionCode.toLong()
+
+    /** SHA-256 of every signing certificate of a package (empty = unknown). */
+    @Suppress("DEPRECATION")
+    private fun signersOf(p: android.content.pm.PackageInfo): Set<String> {
+        val sigs: Array<android.content.pm.Signature> =
+            if (Build.VERSION.SDK_INT >= 28) {
+                val si = p.signingInfo
+                if (si == null) emptyArray()
+                else if (si.hasMultipleSigners()) si.apkContentsSigners
+                else si.signingCertificateHistory
+            } else {
+                p.signatures ?: emptyArray()
+            }
+        val md = MessageDigest.getInstance("SHA-256")
+        return sigs.map { s ->
+            md.digest(s.toByteArray()).joinToString("") { b -> "%02x".format(b) }
+        }.toSet()
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -238,6 +264,42 @@ class MainActivity : FlutterActivity() {
                 }
             }
 
+        MethodChannel(messenger, "ps4sender/notify")
+            .setMethodCallHandler { call, result ->
+                if (call.method == "schedule") {
+                    val repo = call.argument<String>("repo")
+                    val ar = call.argument<Boolean>("ar") ?: true
+                    if (repo == null) {
+                        result.error("arg", "repo missing", null)
+                    } else {
+                        try {
+                            getSharedPreferences("ps4sender_native", Context.MODE_PRIVATE)
+                                .edit().putString("repo", repo).putBoolean("ar", ar).apply()
+                            if (Build.VERSION.SDK_INT >= 33 &&
+                                checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
+                                != PackageManager.PERMISSION_GRANTED
+                            ) {
+                                requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 2)
+                            }
+                            val js = getSystemService(Context.JOB_SCHEDULER_SERVICE) as JobScheduler
+                            if (js.allPendingJobs.none { it.id == 7001 }) {
+                                val info = JobInfo.Builder(7001, ComponentName(this, CheckJobService::class.java))
+                                    .setPeriodic(6 * 60 * 60 * 1000L)
+                                    .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
+                                    .setPersisted(true)
+                                    .build()
+                                js.schedule(info)
+                            }
+                            result.success(true)
+                        } catch (e: Exception) {
+                            result.error("schedule", e.message, null)
+                        }
+                    }
+                } else {
+                    result.notImplemented()
+                }
+            }
+
         val sc = MethodChannel(messenger, "ps4sender/share")
         shareChannel = sc
         initialShare = shareFrom(intent)
@@ -255,6 +317,29 @@ class MainActivity : FlutterActivity() {
             .setMethodCallHandler { call, result ->
                 when (call.method) {
                     "cacheDir" -> result.success(cacheDir.absolutePath)
+                    "inspect" -> {
+                        val path = call.argument<String>("path")
+                        try {
+                            if (path == null) throw IllegalArgumentException("path missing")
+                            val flags =
+                                if (Build.VERSION.SDK_INT >= 28) PackageManager.GET_SIGNING_CERTIFICATES
+                                else PackageManager.GET_SIGNATURES
+                            val installed = packageManager.getPackageInfo(packageName, flags)
+                            val archive = packageManager.getPackageArchiveInfo(path, flags)
+                            val out = HashMap<String, Any?>()
+                            out["installedVersion"] = versionCodeOf(installed)
+                            if (archive != null) {
+                                out["archiveVersion"] = versionCodeOf(archive)
+                                val a = signersOf(archive)
+                                val b = signersOf(installed)
+                                out["sameSignature"] =
+                                    if (a.isEmpty() || b.isEmpty()) null else a.intersect(b).isNotEmpty()
+                            }
+                            result.success(out)
+                        } catch (e: Exception) {
+                            result.error("inspect", e.message, null)
+                        }
+                    }
                     "install" -> {
                         val path = call.argument<String>("path")
                         if (path == null) {

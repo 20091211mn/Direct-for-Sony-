@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../services/announcements.dart';
 import '../services/store_catalog.dart';
 import '../services/updater.dart' show kRepo;
+import 'announcement_editor.dart';
 import 'github_api.dart';
 import 'item_editor.dart';
 
@@ -191,14 +193,21 @@ class AdminHome extends StatefulWidget {
 }
 
 class _AdminHomeState extends State<AdminHome> {
+  int _tab = 0;
+
   List<StoreItem> _items = [];
   bool _loading = true;
   String? _error;
+
+  List<Announcement> _notices = [];
+  bool _noticesLoading = true;
+  String? _noticesError;
 
   @override
   void initState() {
     super.initState();
     _load();
+    _loadNotices();
   }
 
   Future<void> _load() async {
@@ -216,6 +225,21 @@ class _AdminHomeState extends State<AdminHome> {
     }
   }
 
+  Future<void> _loadNotices() async {
+    setState(() {
+      _noticesLoading = true;
+      _noticesError = null;
+    });
+    try {
+      final list = await widget.api.loadAnnouncements();
+      if (mounted) setState(() => _notices = list);
+    } catch (e) {
+      if (mounted) setState(() => _noticesError = 'تعذّر تحميل الإشعارات: $e');
+    } finally {
+      if (mounted) setState(() => _noticesLoading = false);
+    }
+  }
+
   Future<void> _edit([StoreItem? item]) async {
     final changed = await Navigator.of(context).push<bool>(MaterialPageRoute(
       builder: (_) => ItemEditor(api: widget.api, item: item),
@@ -223,12 +247,19 @@ class _AdminHomeState extends State<AdminHome> {
     if (changed == true) _load();
   }
 
-  Future<void> _delete(StoreItem item) async {
+  Future<void> _newNotice() async {
+    final changed = await Navigator.of(context).push<bool>(MaterialPageRoute(
+      builder: (_) => AnnouncementEditor(api: widget.api),
+    ));
+    if (changed == true) _loadNotices();
+  }
+
+  Future<bool> _confirm(String title, String text) async {
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('حذف العنصر'),
-        content: Text('حذف "${item.title}" من المتجر؟ سيُحذف الملف المرفوع أيضاً إن كان على GitHub.'),
+        title: Text(title),
+        content: Text(text),
         actions: [
           TextButton(
               onPressed: () => Navigator.pop(ctx, false),
@@ -239,15 +270,35 @@ class _AdminHomeState extends State<AdminHome> {
         ],
       ),
     );
-    if (ok != true) return;
+    return ok == true;
+  }
+
+  void _snack(String m) {
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(m)));
+    }
+  }
+
+  Future<void> _delete(StoreItem item) async {
+    if (!await _confirm('حذف العنصر',
+        'حذف "${item.title}" من المتجر؟ سيُحذف الملف المرفوع أيضاً إن كان على GitHub.')) {
+      return;
+    }
     try {
       await widget.api.removeItem(item);
       _load();
     } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('فشل الحذف: $e')));
-      }
+      _snack('فشل الحذف: $e');
+    }
+  }
+
+  Future<void> _deleteNotice(Announcement a) async {
+    if (!await _confirm('حذف الإشعار', 'حذف "${a.title}"؟')) return;
+    try {
+      await widget.api.removeAnnouncement(a.id);
+      _loadNotices();
+    } catch (e) {
+      _snack('فشل الحذف: $e');
     }
   }
 
@@ -263,16 +314,97 @@ class _AdminHomeState extends State<AdminHome> {
     return '${v.toStringAsFixed(i == 0 ? 0 : 1)} ${u[i]}';
   }
 
+  Widget _centered(String text) => Center(
+        child: Padding(padding: const EdgeInsets.all(24), child: Text(text)),
+      );
+
+  Widget _storeTab(ColorScheme cs) {
+    if (_loading) return const Center(child: CircularProgressIndicator());
+    if (_error != null) return _centered(_error!);
+    if (_items.isEmpty) {
+      return _centered('المتجر فارغ. اضغط "إضافة" لنشر أول عنصر.');
+    }
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 96),
+      children: [
+        for (final i in _items)
+          Card(
+            color: cs.surfaceContainerHigh,
+            child: ListTile(
+              leading: i.icon.isEmpty
+                  ? const Icon(Icons.inventory_2, size: 40)
+                  : ClipRRect(
+                      borderRadius: BorderRadius.circular(8),
+                      child: Image.network(i.icon,
+                          width: 48,
+                          height: 48,
+                          errorBuilder: (_, __, ___) =>
+                              const Icon(Icons.inventory_2)),
+                    ),
+              title: Row(children: [
+                Expanded(child: Text(i.title)),
+                if (i.featured) const Icon(Icons.star, size: 18),
+              ]),
+              subtitle: Text([
+                if (i.category.isNotEmpty) i.category,
+                if (i.version.isNotEmpty) 'v${i.version}',
+                if (_fmtSize(i.size).isNotEmpty) _fmtSize(i.size),
+              ].join(' · ')),
+              onTap: () => _edit(i),
+              trailing: IconButton(
+                icon: const Icon(Icons.delete_outline),
+                onPressed: () => _delete(i),
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+
+  Widget _noticesTab(ColorScheme cs) {
+    if (_noticesLoading) return const Center(child: CircularProgressIndicator());
+    if (_noticesError != null) return _centered(_noticesError!);
+    if (_notices.isEmpty) {
+      return _centered('لا توجد إشعارات. اضغط "إشعار جديد" لنشر خبر أو تحديث.');
+    }
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 96),
+      children: [
+        for (final a in _notices)
+          Card(
+            color: cs.surfaceContainerHigh,
+            child: ListTile(
+              leading: Icon(a.type == 'update' ? Icons.new_releases : Icons.campaign),
+              title: Text(a.title),
+              subtitle: Text([
+                if (a.date.length >= 10) a.date.substring(0, 10),
+                if (a.features.isNotEmpty) '${a.features.length} ميزات',
+                if (a.type == 'update') 'تحديث',
+              ].join(' · ')),
+              isThreeLine: false,
+              trailing: IconButton(
+                icon: const Icon(Icons.delete_outline),
+                onPressed: () => _deleteNotice(a),
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
+    final storeTab = _tab == 0;
     return Scaffold(
       appBar: AppBar(
-        title: const Text('إدارة المتجر'),
+        title: Text(storeTab ? 'إدارة المتجر' : 'الإشعارات'),
         actions: [
           IconButton(
               tooltip: 'تحديث',
-              onPressed: _loading ? null : _load,
+              onPressed: (storeTab ? _loading : _noticesLoading)
+                  ? null
+                  : (storeTab ? _load : _loadNotices),
               icon: const Icon(Icons.refresh)),
           IconButton(
               tooltip: 'تسجيل الخروج',
@@ -281,56 +413,26 @@ class _AdminHomeState extends State<AdminHome> {
         ],
       ),
       floatingActionButton: FloatingActionButton.extended(
-        onPressed: () => _edit(),
-        icon: const Icon(Icons.add),
-        label: const Text('إضافة'),
+        onPressed: storeTab ? () => _edit() : _newNotice,
+        icon: Icon(storeTab ? Icons.add : Icons.add_alert),
+        label: Text(storeTab ? 'إضافة' : 'إشعار جديد'),
+      ),
+      bottomNavigationBar: NavigationBar(
+        selectedIndex: _tab,
+        onDestinationSelected: (i) => setState(() => _tab = i),
+        destinations: const [
+          NavigationDestination(
+              icon: Icon(Icons.storefront_outlined),
+              selectedIcon: Icon(Icons.storefront),
+              label: 'المتجر'),
+          NavigationDestination(
+              icon: Icon(Icons.notifications_outlined),
+              selectedIcon: Icon(Icons.notifications),
+              label: 'الإشعارات'),
+        ],
       ),
       body: SafeArea(
-        child: _loading
-            ? const Center(child: CircularProgressIndicator())
-            : _error != null
-                ? Center(
-                    child: Padding(
-                        padding: const EdgeInsets.all(24), child: Text(_error!)))
-                : _items.isEmpty
-                    ? const Center(
-                        child: Padding(
-                          padding: EdgeInsets.all(24),
-                          child: Text('المتجر فارغ. اضغط "إضافة" لنشر أول عنصر.'),
-                        ),
-                      )
-                    : ListView(
-                        padding: const EdgeInsets.fromLTRB(16, 16, 16, 96),
-                        children: [
-                          for (final i in _items)
-                            Card(
-                              color: cs.surfaceContainerHigh,
-                              child: ListTile(
-                                leading: i.icon.isEmpty
-                                    ? const Icon(Icons.inventory_2, size: 40)
-                                    : ClipRRect(
-                                        borderRadius: BorderRadius.circular(8),
-                                        child: Image.network(i.icon,
-                                            width: 48,
-                                            height: 48,
-                                            errorBuilder: (_, __, ___) =>
-                                                const Icon(Icons.inventory_2)),
-                                      ),
-                                title: Text(i.title),
-                                subtitle: Text([
-                                  if (i.category.isNotEmpty) i.category,
-                                  if (i.version.isNotEmpty) 'v${i.version}',
-                                  if (_fmtSize(i.size).isNotEmpty) _fmtSize(i.size),
-                                ].join(' · ')),
-                                onTap: () => _edit(i),
-                                trailing: IconButton(
-                                  icon: const Icon(Icons.delete_outline),
-                                  onPressed: () => _delete(i),
-                                ),
-                              ),
-                            ),
-                        ],
-                      ),
+        child: storeTab ? _storeTab(cs) : _noticesTab(cs),
       ),
     );
   }

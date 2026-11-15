@@ -83,6 +83,7 @@ class Ps4Sender {
     bool proxy = true,
     bool fast = true,
     void Function(List<int> served)? onProgress,
+    void Function(String code)? onWarning,
     SendController? controller,
   }) async {
     ServerSocket? info;
@@ -203,14 +204,28 @@ class Ps4Sender {
       info.listen(queue.add);
       final incoming = StreamIterator<Socket>(queue.stream);
 
-      // --- 3. send payload to BinLoader ---------------------------------
-      await _sendPayload(ps4Ip, phoneIp, info.port, log);
+      // --- 3. send the payload to BinLoader (again if the PS4 is busy) -----
+      Socket? firstSocket;
+      for (var attempt = 1;
+          attempt <= 3 && firstSocket == null && !ctl.cancelled;
+          attempt++) {
+        await _sendPayload(ps4Ip, phoneIp, info.port, log);
+        log('Waiting for the PS4 payload...');
+        try {
+          firstSocket = await _next(incoming, const Duration(seconds: 20));
+        } on TimeoutException {
+          if (attempt == 3) rethrow;
+          log('The payload did not answer, sending it again ($attempt/3)...');
+          await Future<void>.delayed(const Duration(seconds: 3));
+        }
+      }
 
       // --- 4. the payload asks for one package at a time ----------------
-      log('Waiting for the PS4 payload...');
       for (var i = 0; i < pkgs.length && !ctl.cancelled; i++) {
         try {
-          final c = await _next(incoming, const Duration(seconds: 20));
+          final c = (i == 0 && firstSocket != null)
+              ? firstSocket
+              : await _next(incoming, const Duration(seconds: 20));
           c.add(_infoBuffer('$base/json/$i.json', pkgs[i]));
           await c.flush();
           await c.close();
@@ -239,11 +254,31 @@ class Ps4Sender {
             if (viaServer(p)) p.size
         ].fold<int>(0, (a, b) => a + b);
         log('Serving the queue. Keep this app open until it ends.');
+        var lastIpCheck = DateTime.now();
+        var warnedIp = false;
+        var waitingNotified = false;
         while (!ctl.cancelled) {
-          final idle = DateTime.now().difference(stats.last).inSeconds;
+          final now = DateTime.now();
+          final idle = now.difference(stats.last).inSeconds;
           final done = stats.total >= totalSize;
-          final limit = done ? 10 : (stats.total == 0 ? 120 : 60);
-          if ((stats.active == 0 && idle >= limit) || idle >= 300) break;
+          // Be patient: after a Wi-Fi drop or a pause the PS4 retries by itself.
+          final limit = done ? 10 : (stats.total == 0 ? 180 : 600);
+          if ((stats.active == 0 && idle >= limit) || idle >= 1800) break;
+          if (!done && stats.total > 0 && idle >= 30 && !waitingNotified) {
+            waitingNotified = true;
+            log('Waiting for the PS4 to continue the download...');
+            onWarning?.call('waiting');
+          }
+          if (idle < 30) waitingNotified = false;
+          if (now.difference(lastIpCheck).inSeconds >= 5) {
+            lastIpCheck = now;
+            final ip = await localIp();
+            if (ip != null && ip != phoneIp && !warnedIp) {
+              warnedIp = true;
+              log('The phone address changed ($phoneIp -> $ip). The PS4 cannot reach the old address.');
+              onWarning?.call('ip_changed');
+            }
+          }
           await Future<void>.delayed(const Duration(milliseconds: 500));
         }
         onProgress?.call(List<int>.of(stats.served));
@@ -297,38 +332,82 @@ class Ps4Sender {
       // the URL-safe base64 characters right after "b64=".
       final m = RegExp(r'b64=([A-Za-z0-9_\-]+)').firstMatch(req.uri.query);
       if (m == null) throw Exception('missing url');
-      final target =
-          utf8.decode(base64Url.decode(base64Url.normalize(m.group(1)!)));
-      final uri = Uri.parse(target);
-      final up = req.method == 'HEAD'
-          ? await client.headUrl(uri)
-          : await client.getUrl(uri);
+      final uri =
+          Uri.parse(utf8.decode(base64Url.decode(base64Url.normalize(m.group(1)!))));
+      final isHead = req.method == 'HEAD';
       final range = req.headers.value(HttpHeaders.rangeHeader);
-      if (range != null) up.headers.set(HttpHeaders.rangeHeader, range);
-      final res = await up.close();
-      req.response.statusCode = res.statusCode;
-      for (final h in const [
-        HttpHeaders.contentRangeHeader,
-        HttpHeaders.contentTypeHeader,
-      ]) {
-        final v = res.headers.value(h);
-        if (v != null) req.response.headers.set(h, v);
-      }
-      req.response.headers
-        ..set(HttpHeaders.acceptRangesHeader, 'bytes')
-        ..set(HttpHeaders.connectionHeader, 'keep-alive');
-      if (res.contentLength >= 0) {
-        req.response.contentLength = res.contentLength;
-      }
-      if (req.method == 'HEAD') {
-        await res.drain<void>();
-      } else {
-        // addStream waits for the PS4 to consume data (no unbounded buffering).
-        await req.response.addStream(res.map((chunk) {
+      // Where the PS4 wants to start, so a dropped connection can be resumed.
+      final rm = range == null ? null : RegExp(r'bytes=(\d+)-(\d*)').firstMatch(range);
+      final startAt = rm == null ? 0 : int.parse(rm.group(1)!);
+      final endAt =
+          (rm == null || rm.group(2)!.isEmpty) ? null : int.parse(rm.group(2)!);
+
+      var received = 0; // bytes already sent to the PS4 in this response
+      var started = false; // response headers sent
+      var attempt = 0;
+      while (true) {
+        final up =
+            isHead ? await client.headUrl(uri) : await client.getUrl(uri);
+        if (range != null || received > 0) {
+          up.headers.set(HttpHeaders.rangeHeader,
+              'bytes=${startAt + received}-${endAt ?? ''}');
+        }
+        final res = await up.close();
+        if (!started) {
+          req.response.statusCode = res.statusCode;
+          for (final h in const [
+            HttpHeaders.contentRangeHeader,
+            HttpHeaders.contentTypeHeader,
+          ]) {
+            final v = res.headers.value(h);
+            if (v != null) req.response.headers.set(h, v);
+          }
+          req.response.headers
+            ..set(HttpHeaders.acceptRangesHeader, 'bytes')
+            ..set(HttpHeaders.connectionHeader, 'keep-alive');
+          if (res.contentLength >= 0) {
+            req.response.contentLength = res.contentLength;
+          }
+          started = true;
+        } else if (res.statusCode != 206) {
+          throw Exception('the server cannot resume (HTTP ${res.statusCode})');
+        }
+        if (isHead) {
+          await res.drain<void>();
+          break;
+        }
+
+        // Pump the bytes; remember whether the upstream side failed.
+        final it = StreamIterator<List<int>>(res);
+        Object? upstreamError;
+        var finished = false;
+        while (true) {
+          bool has;
+          try {
+            has = await it.moveNext();
+          } catch (e) {
+            upstreamError = e;
+            break;
+          }
+          if (!has) {
+            finished = true;
+            break;
+          }
+          final chunk = it.current;
+          req.response.add(chunk);
+          received += chunk.length;
           st.served[idx] += chunk.length;
           st.last = DateTime.now();
-          return chunk;
-        }));
+          await req.response.flush(); // waits for the PS4 (no unbounded buffering)
+        }
+        if (finished) break;
+        try {
+          await it.cancel();
+        } catch (_) {}
+        if (attempt >= 5) throw upstreamError ?? Exception('download failed');
+        attempt++;
+        log('Connection to the server dropped, resuming ($attempt/5)...');
+        await Future<void>.delayed(Duration(seconds: attempt * 2));
       }
     } catch (e) {
       log('Proxy error: $e');
@@ -369,7 +448,7 @@ class Ps4Sender {
       HttpClient c, Uri uri, int from, int to) async {
     final want = to - from + 1;
     Object? last;
-    for (var attempt = 0; attempt < 3; attempt++) {
+    for (var attempt = 0; attempt < 5; attempt++) {
       try {
         final req = await c.getUrl(uri);
         req.headers.set(HttpHeaders.rangeHeader, 'bytes=$from-$to');
@@ -389,7 +468,7 @@ class Ps4Sender {
         return _Chunk(out, null);
       } catch (e) {
         last = e;
-        await Future<void>.delayed(Duration(milliseconds: 300 * (attempt + 1)));
+        await Future<void>.delayed(Duration(milliseconds: 500 * (1 << attempt)));
       }
     }
     return _Chunk(null, last ?? Exception('chunk failed'));
@@ -620,7 +699,7 @@ class Ps4Sender {
     data[off + 4] = (port >> 8) & 0xFF;
     data[off + 5] = port & 0xFF;
 
-    for (var attempt = 0; attempt < 2; attempt++) {
+    for (var attempt = 0; attempt < 4; attempt++) {
       for (final p in _binLoaderPorts) {
         try {
           final s = await Socket.connect(ps4Ip, p,
