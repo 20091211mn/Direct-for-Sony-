@@ -1,2 +1,2 @@
-ps4_sender build: 2026-11-15T12:18Z
-features: admin auto-update, update-loop fix, notices+bell, store highlights, install-now, auto-retry, split code
+pkgsender build: 2026-11-17T20:39Z
+features: official identity (id/name/legal), store versions + update badge, download counts, admin auto-update, notifications fixes

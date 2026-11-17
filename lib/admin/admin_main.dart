@@ -7,6 +7,7 @@ import '../services/updater.dart';
 import 'announcement_editor.dart';
 import 'github_api.dart';
 import 'item_editor.dart';
+import '../util/brand.dart';
 
 void main() => runApp(const AdminApp());
 
@@ -16,7 +17,7 @@ class AdminApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'PS4 Store Admin',
+      title: kAdminName,
       debugShowCheckedModeBanner: false,
       themeMode: ThemeMode.dark,
       darkTheme: ThemeData(
@@ -196,6 +197,7 @@ class _AdminHomeState extends State<AdminHome> {
   int _tab = 0;
 
   List<StoreItem> _items = [];
+  Map<String, int> _downloads = {};
   bool _loading = true;
   String? _error;
 
@@ -337,7 +339,16 @@ class _AdminHomeState extends State<AdminHome> {
     });
     try {
       final items = await widget.api.loadItems();
-      if (mounted) setState(() => _items = items);
+      Map<String, int> downloads = {};
+      try {
+        downloads = await widget.api.assetDownloads();
+      } catch (_) {}
+      if (mounted) {
+        setState(() {
+          _items = items;
+          _downloads = downloads;
+        });
+      }
     } catch (e) {
       if (mounted) setState(() => _error = 'تعذّر تحميل المتجر: $e');
     } finally {
@@ -434,6 +445,23 @@ class _AdminHomeState extends State<AdminHome> {
     return '${v.toStringAsFixed(i == 0 ? 0 : 1)} ${u[i]}';
   }
 
+  /// Download requests GitHub counted for the item's uploaded file (0 for external links).
+  int _downloadsOf(StoreItem i) {
+    final name = GithubApi.assetNameOf(i.url);
+    return name == null ? 0 : (_downloads[name] ?? 0);
+  }
+
+  String _meta(StoreItem i) {
+    final external = GithubApi.assetNameOf(i.url) == null;
+    return [
+      if (i.category.isNotEmpty) i.category,
+      if (i.version.isNotEmpty) 'v${i.version}',
+      if (_fmtSize(i.size).isNotEmpty) _fmtSize(i.size),
+      if (i.history.isNotEmpty) '${i.history.length} إصدارات سابقة',
+      external ? 'رابط خارجي' : '⬇ ${_downloadsOf(i)}',
+    ].join(' · ');
+  }
+
   Widget _centered(String text) => Center(
         child: Padding(padding: const EdgeInsets.all(24), child: Text(text)),
       );
@@ -444,9 +472,16 @@ class _AdminHomeState extends State<AdminHome> {
     if (_items.isEmpty) {
       return _centered('المتجر فارغ. اضغط "إضافة" لنشر أول عنصر.');
     }
+    final total = _items.fold<int>(0, (sum, i) => sum + _downloadsOf(i));
     return ListView(
       padding: const EdgeInsets.fromLTRB(16, 16, 16, 96),
       children: [
+        if (total > 0)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: Text('إجمالي طلبات التنزيل (تقريبي): $total',
+                style: Theme.of(context).textTheme.bodySmall),
+          ),
         for (final i in _items)
           Card(
             color: cs.surfaceContainerHigh,
@@ -465,11 +500,7 @@ class _AdminHomeState extends State<AdminHome> {
                 Expanded(child: Text(i.title)),
                 if (i.featured) const Icon(Icons.star, size: 18),
               ]),
-              subtitle: Text([
-                if (i.category.isNotEmpty) i.category,
-                if (i.version.isNotEmpty) 'v${i.version}',
-                if (_fmtSize(i.size).isNotEmpty) _fmtSize(i.size),
-              ].join(' · ')),
+              subtitle: Text(_meta(i)),
               onTap: () => _edit(i),
               trailing: IconButton(
                 icon: const Icon(Icons.delete_outline),

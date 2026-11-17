@@ -1,4 +1,4 @@
-# PS4 Sender (Flutter)
+# PKG Sender (Flutter)
 
 Sends a direct PKG link to a PS4 running **GoldHEN** (BinLoader only; no Remote Package Installer).
 
@@ -40,13 +40,13 @@ applied by the GitHub Actions workflow after `flutter create`. It runs only whil
 
 ## iPhone
 
-`.github/workflows/build-ios.yml` builds an unsigned `ps4-sender.ipa` (run it manually).
+`.github/workflows/build-ios.yml` builds an unsigned `pkg-sender.ipa` (run it manually).
 It must be signed/sideloaded (for example with AltStore or Sideloadly). iOS suspends apps in
 the background, so keep the app open with the screen on while sending.
 
 ## Updates
 
-Every Android build is published as a GitHub Release (`v1.0.<run number>`, asset `ps4-sender.apk`).
+Every Android build is published as a GitHub Release (`v1.0.<run number>`, asset `pkg-sender.apk`).
 The app checks the latest release (gear icon > Check for updates), downloads the APK and opens the installer.
 Updates only install over the old app if every build is signed with the **same key**: store a keystore in the
 GitHub secret `ANDROID_KEYSTORE_BASE64` (alias `androiddebugkey`, password `android`). The repository must be public.
@@ -73,7 +73,7 @@ GitHub secret `ANDROID_KEYSTORE_BASE64` (alias `androiddebugkey`, password `andr
 ## Store + admin app
 
 - The **Store** tab reads `store/catalog.json` from the repository (public). "Add to queue" sends the item's link to the Send tab.
-- The **admin app** (`lib/admin/admin_main.dart`, built by `build-admin.yml` as `ps4-admin.apk` in the pre-release
+- The **admin app** (`lib/admin/admin_main.dart`, built by `build-admin.yml` as `pkg-admin.apk` in the pre-release
   `admin-latest`) logs in with a GitHub token (`repo` permission) and publishes items:
   it reads the title/icon/size from the PKG, uploads the file to the `store-files` release (or just stores an external link),
   uploads the icon to `store/icons/` and updates `store/catalog.json`.
@@ -82,7 +82,7 @@ GitHub secret `ANDROID_KEYSTORE_BASE64` (alias `androiddebugkey`, password `andr
 
 ## Updates, notices and structure
 
-- The update check picks the highest published release that has `ps4-sender.apk` (iPhone: the SideStore source),
+- The update check picks the highest published release that has `pkg-sender.apk` (iPhone: the SideStore source),
   inspects the downloaded APK (version + signature) before installing, remembers a failed attempt and stops
   showing the banner for that build, and shows "what's new" after a successful update.
 - The admin app publishes news and "new update" notices (with a list of new features, also written into the
@@ -97,3 +97,19 @@ GitHub secret `ANDROID_KEYSTORE_BASE64` (alias `androiddebugkey`, password `andr
 
 The admin app checks the pre-release `admin-latest` (its notes contain `Build N`, written by `build-admin.yml`),
 shows an update banner, downloads the APK, checks version/signature and opens the installer.
+
+## Notifications (Android)
+
+A JobScheduler job checks `store/announcements.json` about every 15 minutes, even when the app is closed, and posts a
+system notification for each new notice (notices published before the app was installed are not announced).
+Settings > System notifications shows whether notifications are allowed and the job is scheduled, and has
+"Test", "Check now" and "Notification settings" buttons. Android may delay jobs on battery saver / sleeping apps.
+
+## Official version
+
+- Application id `com.mn20091211.pkgsender` (admin app: `...pkgsender.admin`), app name "PKG Sender" (`lib/util/brand.dart`).
+  The id comes from `flutter create --org com.mn20091211` in the workflows; the repository name from `--dart-define=REPO`.
+- Release files: `pkg-sender.apk`, `pkg-admin.apk`, `pkg-sender.ipa`.
+- Legal: `DISCLAIMER.md`, `PRIVACY.md`, an About page in the app (disclaimer, privacy, license, credits, library licenses)
+  and a one-time disclaimer on first launch.
+- Store: download counts (admin), older versions per item, "update available" for items sent from the app.

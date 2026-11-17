@@ -156,16 +156,56 @@ class GithubApi {
     await _updateCatalog(
         (items) => items.where((e) => e.id != item.id).toList(),
         'store: remove ${item.title}');
-    // Also delete the uploaded file when it lives in our "store-files" release.
-    final marker = '/releases/download/$filesTag/';
-    final at = item.url.indexOf(marker);
-    if (at >= 0) {
+    // Also delete the uploaded files (current and old versions) from our release.
+    try {
+      final id = await ensureRelease();
+      for (final url in [item.url, ...item.history.map((h) => h.url)]) {
+        final name = assetNameOf(url);
+        if (name != null) await deleteAsset(id, name);
+      }
+    } catch (_) {}
+  }
+
+  /// Name of a file uploaded to the "store-files" release, or null for other links.
+  static String? assetNameOf(String url) {
+    const marker = '/releases/download/$filesTag/';
+    final at = url.indexOf(marker);
+    if (at < 0) return null;
+    return Uri.decodeComponent(url.substring(at + marker.length));
+  }
+
+  /// Deletes one old version of an item (catalog entry and uploaded file).
+  Future<void> deleteVersion(StoreItem item, StoreVersion v) async {
+    await _updateCatalog(
+        (items) => items
+            .map((e) => e.id == item.id
+                ? e.copyWith(
+                    history: e.history.where((h) => h.url != v.url).toList())
+                : e)
+            .toList(),
+        'store: remove old version of ${item.title}');
+    final name = assetNameOf(v.url);
+    if (name != null) {
       try {
-        final name = Uri.decodeComponent(item.url.substring(at + marker.length));
         final id = await ensureRelease();
         await deleteAsset(id, name);
       } catch (_) {}
     }
+  }
+
+  /// Download requests per uploaded file (name -> count). GitHub counts requests,
+  /// so the number is approximate (the app downloads in several parts).
+  Future<Map<String, int>> assetDownloads() async {
+    final r = await _send(
+        'GET', 'https://api.github.com/repos/$repo/releases/tags/$filesTag');
+    if (r.status == 404) return {};
+    _check(r, [200]);
+    final out = <String, int>{};
+    for (final a in ((jsonDecode(r.body) as Map)['assets'] as List? ?? const [])) {
+      final m = a as Map;
+      out[m['name'] as String] = ((m['download_count'] ?? 0) as num).toInt();
+    }
+    return out;
   }
 
   // ------------------------------------------------------------ announcements
@@ -214,7 +254,7 @@ class GithubApi {
       final m = x as Map;
       if (m['draft'] == true || m['prerelease'] == true) continue;
       final hasApk = (m['assets'] as List? ?? const [])
-          .any((a) => (a as Map)['name'] == 'ps4-sender.apk');
+          .any((a) => (a as Map)['name'] == 'pkg-sender.apk');
       if (!hasApk) continue;
       final tag = (m['tag_name'] ?? '') as String;
       out.add(ReleaseInfo(
@@ -247,7 +287,7 @@ class GithubApi {
     final build = int.tryParse(n?.group(1) ?? '') ?? 0;
     String? apk;
     for (final a in (m['assets'] as List? ?? const [])) {
-      if ((a as Map)['name'] == 'ps4-admin.apk') {
+      if ((a as Map)['name'] == 'pkg-admin.apk') {
         apk = a['browser_download_url'] as String?;
       }
     }

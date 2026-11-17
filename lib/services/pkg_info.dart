@@ -39,6 +39,10 @@ class PkgInfo {
   /// False when the server ignores Range requests (no resume, no fast mode).
   final bool rangeOk;
 
+  /// Set when the package was added from the store (to remember what was sent).
+  String? storeId;
+  String? storeVersion;
+
   bool get isLocal => localPath != null || contentUri != null;
 
   /// Same rule the original tool uses: "PS4" + CATEGORY upper-case.

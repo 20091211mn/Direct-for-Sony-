@@ -4,6 +4,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'services/app_state.dart';
+import 'services/notify_bridge.dart';
+import 'about_page.dart';
 import 'services/updater.dart';
 
 class SettingsPage extends StatefulWidget {
@@ -23,6 +25,7 @@ class _SettingsPageState extends State<SettingsPage> {
   double _progress = 0;
   String? _message;
   bool _reinstallHint = false;
+  Map<String, dynamic>? _notif;
 
   String t(String en, String ar) => widget.ar ? ar : en;
 
@@ -30,6 +33,50 @@ class _SettingsPageState extends State<SettingsPage> {
   void initState() {
     super.initState();
     _update = widget.update;
+    if (Platform.isAndroid) _loadNotif();
+  }
+
+  Future<void> _loadNotif() async {
+    final m = await NotifyBridge.status();
+    if (mounted) setState(() => _notif = m);
+  }
+
+  Future<void> _testNotif() async {
+    final ok = await NotifyBridge.test();
+    if (!mounted) return;
+    setState(() => _message = ok
+        ? t('A test notification was sent. Check the notification panel.',
+            'أُرسل إشعار تجريبي. انظر لوحة الإشعارات.')
+        : t('The system does not allow notifications for this app. Open the notification settings and enable them.',
+            'النظام لا يسمح بإشعارات هذا التطبيق. افتح إعدادات الإشعارات وفعّلها.'));
+  }
+
+  Future<void> _checkNotif() async {
+    final r = await NotifyBridge.checkNow();
+    await _loadNotif();
+    if (!mounted) return;
+    setState(() => _message = '${t('Check result', 'نتيجة الفحص')}: ${r ?? '-'}');
+  }
+
+  Widget _statusLine(String label, bool ok) => Padding(
+        padding: const EdgeInsets.only(top: 4),
+        child: Row(children: [
+          Icon(ok ? Icons.check_circle : Icons.cancel,
+              size: 18, color: ok ? Colors.green : Colors.redAccent),
+          const SizedBox(width: 8),
+          Expanded(child: Text(label)),
+        ]),
+      );
+
+  String _lastCheckText() {
+    final ms = (_notif?['lastRun'] as num?)?.toInt() ?? 0;
+    if (ms == 0) {
+      return t('No background check has run yet.', 'لم يُجرَ أي فحص في الخلفية بعد.');
+    }
+    final d = DateTime.fromMillisecondsSinceEpoch(ms);
+    final hh = d.hour.toString().padLeft(2, '0');
+    final mm = d.minute.toString().padLeft(2, '0');
+    return '${t('Last check', 'آخر فحص')}: $hh:$mm · ${_notif?['lastResult'] ?? ''}';
   }
 
   Future<void> _check() async {
@@ -147,6 +194,14 @@ class _SettingsPageState extends State<SettingsPage> {
                     ? t('development build', 'نسخة تطوير')
                     : 'v1.0.$kBuildNumber'),
               ),
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.gavel_outlined),
+                title: Text(t('About, privacy and license', 'حول التطبيق والخصوصية والرخصة')),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () => Navigator.of(context).push(
+                    MaterialPageRoute<void>(builder: (_) => const AboutPage())),
+              ),
               const SizedBox(height: 8),
               FilledButton.tonalIcon(
                 onPressed: (_checking || _downloading) ? null : _check,
@@ -216,6 +271,47 @@ class _SettingsPageState extends State<SettingsPage> {
                       t('Download link copied.', 'تم نسخ رابط التنزيل.')),
                   icon: const Icon(Icons.copy),
                   label: Text(t('Copy the APK download link', 'نسخ رابط تنزيل APK')),
+                ),
+              ],
+              if (Platform.isAndroid) ...[
+                const SizedBox(height: 24),
+                Text(t('System notifications', 'إشعارات النظام'),
+                    style: Theme.of(context).textTheme.titleSmall),
+                _statusLine(t('Allowed by the system', 'مسموحة من النظام'),
+                    _notif?['allowed'] == true),
+                _statusLine(
+                    t('Background check on (about every 15 minutes)',
+                        'الفحص في الخلفية مفعّل (كل 15 دقيقة تقريباً)'),
+                    _notif?['scheduled'] == true),
+                const SizedBox(height: 4),
+                Text(_lastCheckText(), style: Theme.of(context).textTheme.bodySmall),
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 4,
+                  children: [
+                    OutlinedButton.icon(
+                      onPressed: _testNotif,
+                      icon: const Icon(Icons.notifications_active),
+                      label: Text(t('Test', 'إشعار تجريبي')),
+                    ),
+                    OutlinedButton.icon(
+                      onPressed: _checkNotif,
+                      icon: const Icon(Icons.sync),
+                      label: Text(t('Check now', 'فحص الآن')),
+                    ),
+                    OutlinedButton.icon(
+                      onPressed: NotifyBridge.openSettings,
+                      icon: const Icon(Icons.settings),
+                      label: Text(t('Notification settings', 'إعدادات الإشعارات')),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  t('If nothing arrives, also disable battery restrictions for this app in the phone settings.',
+                      'إذا لم يصل شيء، أوقف أيضاً قيود البطارية لهذا التطبيق من إعدادات الهاتف.'),
+                  style: Theme.of(context).textTheme.bodySmall,
                 ),
               ],
               if (!Platform.isAndroid) ...[

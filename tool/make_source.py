@@ -17,7 +17,7 @@ size = os.path.getsize(ipa)
 desc = "Send PKG links and files to a PS4 running GoldHEN."
 
 app = {
-    "name": "PS4 Sender",
+    "name": "PKG Sender",
     "bundleIdentifier": bundle,
     "developerName": owner,
     "subtitle": "Send PKG files to your PS4",
@@ -30,7 +30,7 @@ app = {
         "buildVersion": build,
         "date": now,
         "localizedDescription": f"Build {build}",
-        "downloadURL": f"{base}/ps4-sender.ipa",
+        "downloadURL": f"{base}/pkg-sender.ipa",
         "size": size,
         "minOSVersion": "14.0",
     }],
@@ -38,14 +38,14 @@ app = {
     "version": version,
     "versionDate": now,
     "versionDescription": f"Build {build}",
-    "downloadURL": f"{base}/ps4-sender.ipa",
+    "downloadURL": f"{base}/pkg-sender.ipa",
     "size": size,
 }
 source = {
-    "name": "PS4 Sender",
+    "name": "PKG Sender",
     "identifier": f"{bundle}.source",
     "sourceURL": f"{base}/altstore.json",
-    "subtitle": "Updates for PS4 Sender",
+    "subtitle": "Updates for PKG Sender",
     "description": desc,
     "website": f"https://github.com/{repo}",
     "tintColor": "1B3FD8",

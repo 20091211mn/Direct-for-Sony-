@@ -1,4 +1,4 @@
-name: ps4_sender
+name: pkgsender
 description: Send direct PKG links to a PS4 running GoldHEN (BinLoader). Derived from DirectPackageInstaller (GPL-3.0).
 publish_to: none
 version: 0.1.0+1

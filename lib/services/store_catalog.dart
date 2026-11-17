@@ -9,6 +9,26 @@ import 'updater.dart' show kRepo;
 const String kStoreCatalogUrl =
     'https://raw.githubusercontent.com/$kRepo/main/store/catalog.json';
 
+/// An older version of a store item (kept so people can still pick it).
+class StoreVersion {
+  StoreVersion({required this.version, required this.url, this.size = 0, this.date = ''});
+
+  final String version;
+  final String url;
+  final int size;
+  final String date;
+
+  factory StoreVersion.fromJson(Map<String, dynamic> j) => StoreVersion(
+        version: (j['version'] ?? '') as String,
+        url: (j['url'] ?? '') as String,
+        size: ((j['size'] ?? 0) as num).toInt(),
+        date: (j['date'] ?? '') as String,
+      );
+
+  Map<String, dynamic> toJson() =>
+      {'version': version, 'url': url, 'size': size, 'date': date};
+}
+
 class StoreItem {
   StoreItem({
     required this.id,
@@ -21,6 +41,7 @@ class StoreItem {
     this.icon = '',
     this.added = '',
     this.featured = false,
+    this.history = const [],
   });
 
   final String id;
@@ -36,6 +57,23 @@ class StoreItem {
   /// Shown at the top of the store.
   final bool featured;
 
+  /// Older versions, newest first.
+  final List<StoreVersion> history;
+
+  StoreItem copyWith({List<StoreVersion>? history}) => StoreItem(
+        id: id,
+        title: title,
+        url: url,
+        category: category,
+        description: description,
+        version: version,
+        size: size,
+        icon: icon,
+        added: added,
+        featured: featured,
+        history: history ?? this.history,
+      );
+
   factory StoreItem.fromJson(Map<String, dynamic> j) => StoreItem(
         id: (j['id'] ?? '') as String,
         title: (j['title'] ?? '') as String,
@@ -47,6 +85,9 @@ class StoreItem {
         icon: (j['icon'] ?? '') as String,
         added: (j['added'] ?? '') as String,
         featured: (j['featured'] ?? false) == true,
+        history: ((j['history'] as List?) ?? const [])
+            .map((e) => StoreVersion.fromJson(Map<String, dynamic>.from(e as Map)))
+            .toList(),
       );
 
   Map<String, dynamic> toJson() => {
@@ -60,6 +101,7 @@ class StoreItem {
         'url': url,
         'added': added,
         'featured': featured,
+        'history': history.map((e) => e.toJson()).toList(),
       };
 }
 
@@ -86,6 +128,31 @@ class StoreCatalog {
       });
 }
 
+/// Remembers which version of each store item was sent to the PS4 from this app,
+/// so the store can show "update available".
+class StoreInstalled {
+  static const _key = 'store_installed';
+
+  static Future<Map<String, String>> load() async {
+    try {
+      final raw = (await SharedPreferences.getInstance()).getString(_key);
+      if (raw == null) return {};
+      return Map<String, String>.from(jsonDecode(raw) as Map);
+    } catch (_) {
+      return {};
+    }
+  }
+
+  static Future<void> record(String id, String version) async {
+    try {
+      final p = await SharedPreferences.getInstance();
+      final m = await load();
+      m[id] = version;
+      await p.setString(_key, jsonEncode(m));
+    } catch (_) {}
+  }
+}
+
 class StoreService {
   static const _cacheKey = 'store_cache';
 
@@ -96,7 +163,7 @@ class StoreService {
       final uri = Uri.parse(
           '$kStoreCatalogUrl?t=${DateTime.now().millisecondsSinceEpoch}');
       final req = await c.getUrl(uri);
-      req.headers.set(HttpHeaders.userAgentHeader, 'ps4-sender');
+      req.headers.set(HttpHeaders.userAgentHeader, 'pkg-sender');
       final res = await req.close();
       final body = await res.transform(utf8.decoder).join();
       if (res.statusCode == 404) return StoreCatalog([], exists: false);

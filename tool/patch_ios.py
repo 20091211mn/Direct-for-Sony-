@@ -9,7 +9,7 @@ import shutil
 P = "ios/Runner/Info.plist"
 with open(P, "rb") as f:
     d = plistlib.load(f)
-d["CFBundleDisplayName"] = "PS4 Sender"
+d["CFBundleDisplayName"] = "PKG Sender"
 d["NSLocalNetworkUsageDescription"] = (
     "Needed to send the package to your PS4 on the local network."
 )

@@ -26,6 +26,13 @@ class Bridge {
 
   /// When true the Send tab starts sending right after adding [addUrl].
   static bool autoSend = false;
+
+  /// Which store item / version [addUrl] belongs to.
+  static String? addId;
+  static String? addVersion;
+
+  /// Bumped after a store item was sent, so the Store tab refreshes "update available".
+  static final ValueNotifier<int> storeTick = ValueNotifier<int>(0);
 }
 
 /// Number shown on the bell: unread notices + a pending app update.

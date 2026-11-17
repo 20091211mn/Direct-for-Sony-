@@ -79,7 +79,7 @@ class AnnouncementService {
     try {
       final req = await c.getUrl(Uri.parse(
           '$kAnnouncementsUrl?t=${DateTime.now().millisecondsSinceEpoch}'));
-      req.headers.set(HttpHeaders.userAgentHeader, 'ps4-sender');
+      req.headers.set(HttpHeaders.userAgentHeader, 'pkg-sender');
       final res = await req.close();
       final body = await res.transform(utf8.decoder).join();
       if (res.statusCode == 404) return [];

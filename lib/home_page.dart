@@ -20,9 +20,12 @@ import 'services/pkg_info.dart';
 import 'services/progress.dart';
 import 'services/ps4_sender.dart';
 import 'services/share_intake.dart';
+import 'services/store_catalog.dart';
 import 'services/updater.dart';
 import 'settings_page.dart';
+import 'util/brand.dart';
 import 'util/format.dart';
+import 'util/legal.dart';
 import 'util/ip_formatter.dart';
 import 'widgets/notification_bell.dart';
 import 'widgets/progress_card.dart';
@@ -71,7 +74,10 @@ class _HomePageState extends State<HomePage> {
       if (mounted) setState(() => _phoneIp = ip);
     });
     Bridge.addUrl.addListener(_onBridge);
-    _loadPrefs().then((_) => _initShare());
+    _loadPrefs().then((_) async {
+      await _maybeShowTerms();
+      await _initShare();
+    });
     NetCheck.hasCellular().then((v) {
       if (mounted) setState(() => _hasCellular = v);
     });
@@ -83,6 +89,42 @@ class _HomePageState extends State<HomePage> {
 
   void _rebuild() {
     if (mounted) setState(() {});
+  }
+
+  /// First launch: the disclaimer must be accepted once.
+  Future<void> _maybeShowTerms() async {
+    final p = _prefs;
+    if (p == null || !mounted) return;
+    if (p.getBool('terms_accepted') ?? false) return;
+    final ok = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => PopScope(
+        canPop: false,
+        child: Directionality(
+          textDirection: _ar ? TextDirection.rtl : TextDirection.ltr,
+          child: AlertDialog(
+            title: Text(t('Before you start', 'قبل أن تبدأ')),
+            content: SingleChildScrollView(child: Text(disclaimerText(_ar))),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: Text(t('Exit', 'خروج')),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(ctx, true),
+                child: Text(t('I agree', 'أوافق')),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    if (ok == true) {
+      await p.setBool('terms_accepted', true);
+    } else {
+      SystemNavigator.pop();
+    }
   }
 
   void _onSendWarning(String code) {
@@ -156,6 +198,10 @@ class _HomePageState extends State<HomePage> {
     Bridge.addUrl.value = null;
     final auto = Bridge.autoSend;
     Bridge.autoSend = false;
+    final sid = Bridge.addId;
+    final sver = Bridge.addVersion;
+    Bridge.addId = null;
+    Bridge.addVersion = null;
     if (_sending) {
       _snack(t('Busy sending, try again after it ends.',
           'جارٍ الإرسال، أعد المحاولة بعد انتهائه.'));
@@ -166,7 +212,12 @@ class _HomePageState extends State<HomePage> {
       _source = Source.link;
       _url.text = u;
     });
+    final before = _queue.length;
     await _addLink();
+    if (sid != null && _queue.length > before) {
+      _queue.last.storeId = sid;
+      _queue.last.storeVersion = sver;
+    }
     if (!auto) return;
     if (wasEmpty && _queue.length == 1) {
       if (_ps4.text.trim().isEmpty) {
@@ -674,6 +725,18 @@ class _HomePageState extends State<HomePage> {
       try {
         await WakelockPlus.disable();
       } catch (_) {}
+      for (var i = 0; i < pkgs.length; i++) {
+        final p = pkgs[i];
+        final sid = p.storeId;
+        if (!ctl.cancelled &&
+            sid != null &&
+            p.size > 0 &&
+            i < _served.length &&
+            _served[i] >= p.size) {
+          await StoreInstalled.record(sid, p.storeVersion ?? '');
+          Bridge.storeTick.value++;
+        }
+      }
       final r = _totals();
       if (!ctl.cancelled && r.total > 0 && r.done >= r.total) {
         await ForegroundKeeper.finished(
@@ -704,7 +767,7 @@ class _HomePageState extends State<HomePage> {
       textDirection: _ar ? TextDirection.rtl : TextDirection.ltr,
       child: Scaffold(
         appBar: AppBar(
-          title: const Text('PS4 Sender'),
+          title: const Text(kAppName),
           actions: [
             const NotificationBell(),
             IconButton(

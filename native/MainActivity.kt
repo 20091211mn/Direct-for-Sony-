@@ -200,7 +200,7 @@ class MainActivity : FlutterActivity() {
                         if (Build.VERSION.SDK_INT >= 26) {
                             nm.createNotificationChannel(
                                 NotificationChannel(
-                                    "ps4sender_done", "PS4 Sender (finished)",
+                                    "ps4sender_done", "PKG Sender (finished)",
                                     NotificationManager.IMPORTANCE_DEFAULT
                                 )
                             )
@@ -208,7 +208,7 @@ class MainActivity : FlutterActivity() {
                         } else {
                             b = Notification.Builder(this)
                         }
-                        b.setContentTitle("PS4 Sender")
+                        b.setContentTitle("PKG Sender")
                             .setContentText(text)
                             .setSmallIcon(android.R.drawable.stat_sys_download_done)
                             .setAutoCancel(true)
@@ -266,37 +266,70 @@ class MainActivity : FlutterActivity() {
 
         MethodChannel(messenger, "ps4sender/notify")
             .setMethodCallHandler { call, result ->
-                if (call.method == "schedule") {
-                    val repo = call.argument<String>("repo")
-                    val ar = call.argument<Boolean>("ar") ?: true
-                    if (repo == null) {
-                        result.error("arg", "repo missing", null)
-                    } else {
-                        try {
-                            getSharedPreferences("ps4sender_native", Context.MODE_PRIVATE)
-                                .edit().putString("repo", repo).putBoolean("ar", ar).apply()
-                            if (Build.VERSION.SDK_INT >= 33 &&
-                                checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
-                                != PackageManager.PERMISSION_GRANTED
-                            ) {
-                                requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 2)
+                val prefs = getSharedPreferences(NoticeChecker.PREFS, Context.MODE_PRIVATE)
+                when (call.method) {
+                    "schedule" -> {
+                        val repo = call.argument<String>("repo")
+                        val ar = call.argument<Boolean>("ar") ?: true
+                        if (repo == null) {
+                            result.error("arg", "repo missing", null)
+                        } else {
+                            try {
+                                prefs.edit().putString("repo", repo).putBoolean("ar", ar).apply()
+                                if (Build.VERSION.SDK_INT >= 33 &&
+                                    checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
+                                    != PackageManager.PERMISSION_GRANTED
+                                ) {
+                                    requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 2)
+                                }
+                                val js = getSystemService(Context.JOB_SCHEDULER_SERVICE) as JobScheduler
+                                js.cancel(7001) // the old 6-hour job
+                                if (js.allPendingJobs.none { it.id == 7002 }) {
+                                    val info = JobInfo.Builder(7002, ComponentName(this, CheckJobService::class.java))
+                                        .setPeriodic(15 * 60 * 1000L)
+                                        .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
+                                        .setPersisted(true)
+                                        .build()
+                                    js.schedule(info)
+                                }
+                                result.success(true)
+                            } catch (e: Exception) {
+                                result.error("schedule", e.message, null)
                             }
-                            val js = getSystemService(Context.JOB_SCHEDULER_SERVICE) as JobScheduler
-                            if (js.allPendingJobs.none { it.id == 7001 }) {
-                                val info = JobInfo.Builder(7001, ComponentName(this, CheckJobService::class.java))
-                                    .setPeriodic(6 * 60 * 60 * 1000L)
-                                    .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
-                                    .setPersisted(true)
-                                    .build()
-                                js.schedule(info)
-                            }
-                            result.success(true)
-                        } catch (e: Exception) {
-                            result.error("schedule", e.message, null)
                         }
                     }
-                } else {
-                    result.notImplemented()
+                    "status" -> {
+                        val js = getSystemService(Context.JOB_SCHEDULER_SERVICE) as JobScheduler
+                        val m = HashMap<String, Any?>()
+                        m["allowed"] = NoticeChecker.canNotify(this)
+                        m["scheduled"] = js.allPendingJobs.any { it.id == 7002 }
+                        m["lastRun"] = prefs.getLong("last_run", 0L)
+                        m["lastResult"] = prefs.getString("last_result", "") ?: ""
+                        result.success(m)
+                    }
+                    "checkNow" -> {
+                        Thread {
+                            val r = NoticeChecker.runAndRecord(this)
+                            runOnUiThread { result.success(r) }
+                        }.start()
+                    }
+                    "test" -> result.success(NoticeChecker.test(this))
+                    "openSettings" -> {
+                        try {
+                            val i = if (Build.VERSION.SDK_INT >= 26) {
+                                Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                                    .putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
+                            } else {
+                                Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+                                    .setData(Uri.parse("package:$packageName"))
+                            }
+                            startActivity(i)
+                            result.success(true)
+                        } catch (e: Exception) {
+                            result.error("settings", e.message, null)
+                        }
+                    }
+                    else -> result.notImplemented()
                 }
             }
 

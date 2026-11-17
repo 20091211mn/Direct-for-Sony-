@@ -38,13 +38,13 @@ class KeepAliveService : Service() {
         val b: Notification.Builder
         if (Build.VERSION.SDK_INT >= 26) {
             nm.createNotificationChannel(
-                NotificationChannel("ps4sender", "PS4 Sender", NotificationManager.IMPORTANCE_LOW)
+                NotificationChannel("ps4sender", "PKG Sender", NotificationManager.IMPORTANCE_LOW)
             )
             b = Notification.Builder(this, "ps4sender")
         } else {
             b = Notification.Builder(this)
         }
-        b.setContentTitle("PS4 Sender")
+        b.setContentTitle("PKG Sender")
             .setContentText("Sending package to the PS4...")
             .setSmallIcon(android.R.drawable.stat_sys_download)
             .setOngoing(true)

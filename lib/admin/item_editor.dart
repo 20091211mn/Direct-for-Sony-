@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../services/announcements.dart';
 import '../services/native_files.dart';
 import '../services/pkg_info.dart';
 import '../services/store_catalog.dart';
@@ -62,6 +63,8 @@ class _ItemEditorState extends State<ItemEditor> {
 
   _Src _src = _Src.link;
   bool _featured = false;
+  bool _announce = false;
+  List<StoreVersion> _history = [];
   PkgInfo? _info;
   PickedFile? _file;
   bool _reading = false;
@@ -81,6 +84,7 @@ class _ItemEditorState extends State<ItemEditor> {
       _desc.text = i.description;
       _url.text = i.url;
       _featured = i.featured;
+      _history = List<StoreVersion>.of(i.history);
     }
   }
 
@@ -146,6 +150,37 @@ class _ItemEditorState extends State<ItemEditor> {
     }
   }
 
+  Future<void> _deleteVersion(StoreVersion v) async {
+    final item = widget.item;
+    if (item == null) return;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('حذف الإصدار'),
+        content: Text('حذف الإصدار v${v.version}؟ سيُحذف الملف المرفوع أيضاً إن كان على GitHub.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('إلغاء')),
+          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('حذف')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      await widget.api.deleteVersion(item.copyWith(history: _history), v);
+      if (mounted) {
+        setState(() => _history = _history.where((h) => h.url != v.url).toList());
+      }
+    } catch (e) {
+      if (mounted) setState(() => _error = _explain(e));
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
   Future<void> _publish() async {
     final title = _title.text.trim();
     final existing = widget.item;
@@ -192,7 +227,9 @@ class _ItemEditorState extends State<ItemEditor> {
         if (file != null) {
           setState(() => _status = 'جارٍ رفع الملف إلى GitHub…');
           final rel = await api.ensureRelease();
-          final name = '$id.pkg';
+          // One file per version, so older versions stay available.
+          final ver = _version.text.trim().replaceAll(RegExp(r'[^A-Za-z0-9._-]+'), '-');
+          final name = ver.isEmpty ? '$id.pkg' : '$id-$ver.pkg';
           await api.deleteAsset(rel, name);
           url = await api.uploadAsset(
             rel,
@@ -224,18 +261,48 @@ class _ItemEditorState extends State<ItemEditor> {
         _progress = 0;
       });
       final today = DateTime.now().toIso8601String().substring(0, 10);
+      final version = _version.text.trim();
+      final newFile =
+          existing != null && existing.url.isNotEmpty && url != existing.url;
+      var history = _history;
+      if (newFile) {
+        history = [
+          StoreVersion(
+              version: existing.version,
+              url: existing.url,
+              size: existing.size,
+              date: existing.added),
+          ...history,
+        ].take(10).toList();
+      }
       await api.upsertItem(StoreItem(
         id: id,
         title: title,
         url: url,
         category: _category.text.trim(),
         description: _desc.text.trim(),
-        version: _version.text.trim(),
+        version: version,
         size: size,
         icon: icon,
-        added: existing?.added.isNotEmpty == true ? existing!.added : today,
+        added: (existing == null || newFile)
+            ? today
+            : (existing.added.isNotEmpty ? existing.added : today),
         featured: _featured,
+        history: history,
       ));
+      if (_announce &&
+          existing != null &&
+          (newFile || version != existing.version)) {
+        await api.addAnnouncement(Announcement(
+          id: 'n-${DateTime.now().millisecondsSinceEpoch}',
+          type: 'news',
+          title: 'تحديث $title',
+          body: version.isEmpty
+              ? 'يوجد إصدار جديد في المتجر.'
+              : 'الإصدار $version متوفر الآن في المتجر.',
+          date: DateTime.now().toUtc().toIso8601String(),
+        ));
+      }
       if (!mounted) return;
       Navigator.pop(context, true);
     } catch (e) {
@@ -378,6 +445,32 @@ class _ItemEditorState extends State<ItemEditor> {
               value: _featured,
               onChanged: _busy ? null : (v) => setState(() => _featured = v),
             ),
+            if (editing)
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('نشر إشعار بهذا التحديث'),
+                subtitle: const Text('يُنشر خبر للمستخدمين إذا غيّرت الملف أو الإصدار'),
+                value: _announce,
+                onChanged: _busy ? null : (v) => setState(() => _announce = v),
+              ),
+            if (editing && _history.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              Text('الإصدارات السابقة', style: Theme.of(context).textTheme.titleSmall),
+              for (final v in _history)
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  dense: true,
+                  title: Text('v${v.version}'),
+                  subtitle: Text([
+                    if (v.size > 0) _fmtSize(v.size),
+                    if (v.date.length >= 10) v.date.substring(0, 10),
+                  ].join(' · ')),
+                  trailing: IconButton(
+                    icon: const Icon(Icons.delete_outline),
+                    onPressed: _busy ? null : () => _deleteVersion(v),
+                  ),
+                ),
+            ],
             const SizedBox(height: 16),
             if (_error != null)
               Card(

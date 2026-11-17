@@ -13,6 +13,7 @@ sed "s/^package .*/package $PKG/" native/MainActivity.kt > "$MA"
 sed "s/^package .*/package $PKG/" native/KeepAliveService.kt > "$DIR/KeepAliveService.kt"
 sed "s/^package .*/package $PKG/" native/UpdateFileProvider.kt > "$DIR/UpdateFileProvider.kt"
 sed "s/^package .*/package $PKG/" native/CheckJobService.kt > "$DIR/CheckJobService.kt"
+sed "s/^package .*/package $PKG/" native/NoticeChecker.kt > "$DIR/NoticeChecker.kt"
 
 # app icon (adaptive + legacy) and its background colour
 cp -r native/res/. android/app/src/main/res/
@@ -49,8 +50,8 @@ share = ('<intent-filter><action android:name="android.intent.action.SEND"/>'
 admin = os.environ.get("APP_KIND") == "admin"
 if not admin:  # the admin app must not appear in the Share menu
     s = s.replace("</activity>", share + "</activity>", 1)
-label = "PS4 Store Admin" if admin else "PS4 Sender"
-s = s.replace('android:label="ps4_sender"', 'android:label="%s"' % label)
+label = "PKG Store Admin" if admin else "PKG Sender"
+s = re.sub(r'(<application\b[^>]*?android:label=")[^"]*(")', lambda m: m.group(1) + label + m.group(2), s, count=1)
 s = s.replace("<application", '<application android:usesCleartextTraffic="true"', 1)
 prov = ('<provider android:name=".UpdateFileProvider" '
         'android:authorities="${applicationId}.fileprovider" '

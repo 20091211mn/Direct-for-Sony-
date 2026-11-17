@@ -29,7 +29,7 @@ jobs:
           else
             echo "::warning::ANDROID_KEYSTORE_BASE64 is not set: the APK gets a random key and cannot update the installed app"
           fi
-      - run: flutter create . --platforms=android
+      - run: flutter create . --platforms=android --org com.mn20091211
       - run: bash tool/patch_android.sh
       - run: flutter pub get
       - run: >
@@ -37,12 +37,13 @@ jobs:
           --build-name=1.0.${{ github.run_number }}
           --build-number=${{ github.run_number }}
           --dart-define=BUILD_NUMBER=${{ github.run_number }}
+          --dart-define=REPO=${{ github.repository }}
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          cp build/app/outputs/flutter-apk/app-release.apk ps4-sender.apk
-          gh release create "v1.0.${{ github.run_number }}" ps4-sender.apk \
+          cp build/app/outputs/flutter-apk/app-release.apk pkg-sender.apk
+          gh release create "v1.0.${{ github.run_number }}" pkg-sender.apk \
             --repo "$GITHUB_REPOSITORY" \
             --title "v1.0.${{ github.run_number }}" \
             --notes "Build ${{ github.run_number }}"

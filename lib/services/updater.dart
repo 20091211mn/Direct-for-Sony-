@@ -8,14 +8,15 @@ import 'package:shared_preferences/shared_preferences.dart';
 const int kBuildNumber = int.fromEnvironment('BUILD_NUMBER', defaultValue: 0);
 
 /// GitHub repository that publishes the releases (must be public).
-const String kRepo = '20091211mn/Direct-for-Sony-';
+const String kRepo =
+    String.fromEnvironment('REPO', defaultValue: '20091211mn/Direct-for-Sony-');
 
 /// SideStore / AltStore source published by the iOS workflow.
 const String kSourceUrl =
     'https://github.com/$kRepo/releases/download/ios-latest/altstore.json';
 
 /// Name of the Android APK attached to every release.
-const String kApkName = 'ps4-sender.apk';
+const String kApkName = 'pkg-sender.apk';
 
 /// Bullet lines of release notes ("- feature", "* feature", "• feature").
 /// Falls back to the non-empty lines when there are no bullets.
@@ -82,7 +83,7 @@ class Updater {
     try {
       final req = await c.getUrl(Uri.parse(url));
       req.headers.set(HttpHeaders.acceptHeader, 'application/vnd.github+json');
-      req.headers.set(HttpHeaders.userAgentHeader, 'ps4-sender');
+      req.headers.set(HttpHeaders.userAgentHeader, 'pkg-sender');
       final res = await req.close();
       final body = await res.transform(utf8.decoder).join();
       if (res.statusCode == 404) throw Exception('not_found');

@@ -22,6 +22,7 @@ class _StorePageState extends State<StorePage> {
   String? _error;
   String _query = '';
   String _category = '';
+  Map<String, String> _installed = {};
 
   String t(String en, String ar) => appArabic.value ? ar : en;
 
@@ -29,7 +30,26 @@ class _StorePageState extends State<StorePage> {
   void initState() {
     super.initState();
     _load();
+    _loadInstalled();
+    Bridge.storeTick.addListener(_loadInstalled);
   }
+
+  @override
+  void dispose() {
+    Bridge.storeTick.removeListener(_loadInstalled);
+    super.dispose();
+  }
+
+  Future<void> _loadInstalled() async {
+    final m = await StoreInstalled.load();
+    if (mounted) setState(() => _installed = m);
+  }
+
+  /// The store has a newer version than the one sent from this app.
+  bool _hasUpdate(StoreItem i) =>
+      i.version.isNotEmpty &&
+      _installed.containsKey(i.id) &&
+      _installed[i.id] != i.version;
 
   Future<void> _load() async {
     setState(() {
@@ -71,6 +91,8 @@ class _StorePageState extends State<StorePage> {
 
   void _add(StoreItem item) {
     Bridge.autoSend = false;
+    Bridge.addId = item.id;
+    Bridge.addVersion = item.version;
     Bridge.addUrl.value = item.url;
     Bridge.tab.value = 0;
     ScaffoldMessenger.of(context)
@@ -84,9 +106,30 @@ class _StorePageState extends State<StorePage> {
   /// Adds the item and, when the queue was empty and the PS4 address is saved, sends it.
   void _installNow(StoreItem item) {
     Bridge.autoSend = true;
+    Bridge.addId = item.id;
+    Bridge.addVersion = item.version;
     Bridge.addUrl.value = item.url;
     Bridge.tab.value = 0;
   }
+
+  /// Adds an older version of an item to the queue.
+  void _addVersion(StoreItem item, StoreVersion v) {
+    Bridge.autoSend = false;
+    Bridge.addId = item.id;
+    Bridge.addVersion = v.version;
+    Bridge.addUrl.value = v.url;
+    Bridge.tab.value = 0;
+  }
+
+  Widget _updateBadge(ColorScheme cs) => Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+        decoration: BoxDecoration(
+          color: cs.tertiary,
+          borderRadius: BorderRadius.circular(10),
+        ),
+        child: Text(t('Update available', 'تحديث متوفر'),
+            style: TextStyle(color: cs.onTertiary, fontSize: 12)),
+      );
 
   Widget _icon(StoreItem item, {double size = 56}) {
     final fallback = Container(
@@ -182,6 +225,7 @@ class _StorePageState extends State<StorePage> {
       if (item.version.isNotEmpty) 'v${item.version}',
       if (_fmtSize(item.size).isNotEmpty) _fmtSize(item.size),
     ].join(' · ');
+    final update = _hasUpdate(item);
     return Card(
       color: cs.surfaceContainerHigh,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
@@ -204,10 +248,15 @@ class _StorePageState extends State<StorePage> {
                           child: Text(item.title,
                               style: Theme.of(context).textTheme.titleMedium),
                         ),
-                        if (_isNew(item)) _newBadge(cs),
+                        if (update) _updateBadge(cs) else if (_isNew(item)) _newBadge(cs),
                       ]),
                       const SizedBox(height: 2),
                       Text(meta, style: Theme.of(context).textTheme.bodySmall),
+                      if (update)
+                        Text(
+                          '${t('You sent', 'آخر إصدار أرسلته')}: v${_installed[item.id]}',
+                          style: Theme.of(context).textTheme.bodySmall,
+                        ),
                     ],
                   ),
                 ),
@@ -230,11 +279,38 @@ class _StorePageState extends State<StorePage> {
                 ),
                 FilledButton.icon(
                   onPressed: () => _installNow(item),
-                  icon: const Icon(Icons.bolt),
-                  label: Text(t('Install now', 'تثبيت الآن')),
+                  icon: Icon(update ? Icons.system_update : Icons.bolt),
+                  label: Text(update
+                      ? t('Update', 'تحديث')
+                      : t('Install now', 'تثبيت الآن')),
                 ),
               ],
             ),
+            if (item.history.isNotEmpty)
+              ExpansionTile(
+                tilePadding: EdgeInsets.zero,
+                title: Text(
+                  '${t('Previous versions', 'الإصدارات السابقة')} (${item.history.length})',
+                  style: Theme.of(context).textTheme.bodyMedium,
+                ),
+                children: [
+                  for (final v in item.history)
+                    ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      dense: true,
+                      title: Text('v${v.version}'),
+                      subtitle: Text([
+                        if (_fmtSize(v.size).isNotEmpty) _fmtSize(v.size),
+                        if (v.date.length >= 10) v.date.substring(0, 10),
+                      ].join(' · ')),
+                      trailing: IconButton(
+                        tooltip: t('Add to queue', 'إضافة للقائمة'),
+                        icon: const Icon(Icons.playlist_add),
+                        onPressed: () => _addVersion(item, v),
+                      ),
+                    ),
+                ],
+              ),
           ],
         ),
       ),
